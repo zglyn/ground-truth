@@ -522,3 +522,22 @@ def test_portfolio_page_uses_checkboxes_and_hides_rejected(tmp_path: Path) -> No
     assert "Rejected suggestions (1)" in page
     assert 'data-status="suggested"' in page
     assert "Total allocated: 60%" in page
+
+
+def test_demo_mode_injects_the_staged_story(tmp_path: Path) -> None:
+    from ground_truth.demo import inject, prepare
+
+    env = world(tmp_path)
+    prepare(env.swarm)
+    page = render_page(build(env.swarm.view()), "/", {})[1]
+    assert "Inject breaking news: Chile lithium mine strike" in page
+    assert inject(env.swarm) == "recorded"
+    view = env.swarm.view()
+    thesis = view["theses"][-1]
+    assert {impact["ticker"]: impact["stance"] for impact in thesis["impacts"]} == {"TSLA": "Bear", "ALB": "Bull"}
+    tsla = next(impact for impact in thesis["impacts"] if impact["ticker"] == "TSLA")
+    assert round(tsla["day_move"], 3) == -0.036
+    assert thesis["claims"][0]["kind"] == "evidence"
+    assert len(env.discord.sent) == 1 and "TSLA" in env.discord.sent[0]["text"]
+    assert inject(env.swarm) == "already"
+    assert len(env.swarm.view()["theses"]) == 1

@@ -193,6 +193,7 @@ class Dashboard:
     dismissed: list[dict[str, Any]]
     stages: dict[str, dict[str, Any]]
     headlines: dict[str, str] = field(default_factory=dict)
+    demo: bool = False
 
     def latest_per_event(self) -> list[ThesisCard]:
         latest: dict[str, ThesisCard] = {}
@@ -370,4 +371,5 @@ def build(view: dict[str, Any]) -> Dashboard:
         dismissed=list(view["dismissed"]),
         stages=dict(view.get("stages") or {}),
         headlines=headlines,
+        demo=bool(view.get("demo")),
     )

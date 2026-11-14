@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import time
 
 from ground_truth.adapters import LiveNews, LivePages, LiveQuotes, LiveYou
@@ -87,7 +88,14 @@ def build_swarm(path: str | None = None) -> Swarm:
 
 
 def main() -> None:
-    swarm = build_swarm()
+    demo = "--demo" in sys.argv[1:]
+    if demo:
+        from ground_truth.demo import prepare
+
+        swarm = build_swarm(os.environ.get("SWARM_DEMO_DB", "ground-truth-demo.sqlite"))
+        prepare(swarm)
+    else:
+        swarm = build_swarm()
     host, port = bind_address()
     try:
         httpd = serve(swarm, host, port)
@@ -106,6 +114,8 @@ def main() -> None:
     print(f"recording {status['detail']}", flush=True)
     if swarm.blocked:
         print("research paused: the recording check failed; the dashboard stays up", flush=True)
+    if demo:
+        print("demo mode: staged inputs only. Use the button on the Overview to inject the story.", flush=True)
     while True:
         try:
             swarm.tick()

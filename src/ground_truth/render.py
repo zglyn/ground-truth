@@ -21,6 +21,9 @@ SAVED = {
     "settings": "Settings saved.",
     "run": "A check has started. Refresh in a minute to see the results.",
     "running": "A check is already running.",
+    "demo": "Staged story injected. The swarm grouped it, researched it and wrote the Thesis below.",
+    "demo-canned": "The recorded run failed, so the canned fallback Thesis is shown.",
+    "demo-already": "The staged story was already injected. Restart with a fresh demo database to run it again.",
 }
 
 
@@ -397,8 +400,16 @@ def overview(dash: Dashboard, *, holding: str = "", stance: str = "", notice: st
         f'<section id="dismissed" class="panel"><details><summary>Dismissed Sightings ({len(dash.dismissed)})</summary>'
         f'<ul class="wrap-any">{dismissed or "<li>None yet.</li>"}</ul></details></section>'
     )
+    demo = ""
+    if dash.demo:
+        demo = (
+            '<div class="notice notice-warn"><h2>Demo mode</h2>'
+            "<p>Inputs are staged: no live news, recorded You.com responses and staged prices. "
+            "The Supervisor, Researcher, Analyst, Receipt checks and alerts run for real.</p>"
+            f'{_form_open("demo", "demo_inject", "/")}<button>Inject breaking news: Chile lithium mine strike</button></form></div>'
+        )
     body = (
-        f"{_failure_banner(dash, '/')}"
+        f"{demo}{_failure_banner(dash, '/')}"
         f'<div class="layout"><div>{main}{dismissed_html}</div>{_aside(dash)}</div>'
     )
     return page(dash, "Overview", "/", body, notice=notice)

@@ -204,6 +204,14 @@ def _save_settings(swarm: Swarm, fields: Fields) -> Outcome:
     return Outcome(saved="settings")
 
 
+def _demo_inject(swarm: Swarm, fields: Fields) -> Outcome:
+    if not swarm.demo_mode:
+        return Outcome({"_form": ERRORS["action"]})
+    from ground_truth.demo import inject
+
+    return Outcome(saved={"recorded": "demo", "canned": "demo-canned", "already": "demo-already"}[inject(swarm)])
+
+
 def _run_now(swarm: Swarm, fields: Fields) -> Outcome:
     return Outcome(saved="run" if swarm.run_now() else "running")
 
@@ -218,6 +226,7 @@ COMMANDS: dict[str, Callable[[Swarm, Fields], Outcome]] = {
     "add_topic": _add_topic,
     "save_settings": _save_settings,
     "run_now": _run_now,
+    "demo_inject": _demo_inject,
 }
 
 

@@ -159,6 +159,7 @@ class Swarm:
         self._tick_lock = threading.Lock()
         self.recording: dict[str, Any] = {"ok": False, "detail": "not checked"}
         self.blocked = False
+        self.demo_mode = False
         self.executor = ResearchExecutor(self.store, lambda: self.you, clock, allows=self._budget_allows)
         if self.store.setting("alert_weight", "") == "":
             self.store.set_setting("alert_weight", "0.25")
@@ -448,6 +449,7 @@ class Swarm:
                 "analyst": self.store.setting("analyst_harness", "claude"),
             },
             "now": self.clock.now().isoformat(),
+            "demo": self.demo_mode,
             "orders": [],
         }
 

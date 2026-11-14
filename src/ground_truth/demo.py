@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ground_truth.domain import QUESTIONS, NewsItem
+from datetime import date
+
+from ground_truth.domain import NewsItem, Quote
 from ground_truth.swarm import Swarm
 
 PASSAGE = "Workers at a Chile lithium mine stopped work."
@@ -30,10 +32,46 @@ class RecordedPages:
         return PAGE
 
 
+class RecordedQuotes:
+    """Staged prices: TSLA already down on the day, ALB up. Earlier days get the prior close."""
+
+    MOVES = {"TSLA": (250.0, 241.0), "ALB": (80.0, 83.2)}
+
+    def __init__(self, today: Any) -> None:
+        self._today = today
+
+    def quote(self, ticker: str, on: date) -> Quote:
+        prior, current = self.MOVES.get(ticker.upper(), (100.0, 100.0))
+        if on < self._today():
+            return Quote(prior, 900_000.0)
+        return Quote(current, 1_400_000.0)
+
+
+class NoNews:
+    """The demo's Scout sees only the staged story, never live headlines."""
+
+    def google_news(self, topic: str) -> list:
+        return []
+
+    def rss(self, url: str) -> list:
+        return []
+
+    def edgar(self, ticker: str) -> list:
+        return []
+
+
+DEMO_ANSWERS = {
+    "exposure": "Tesla buys lithium hydroxide from several suppliers, some of it refined from Chilean brine.",
+    "magnitude": "Recorded demo finding: the struck mine is a mid-sized producer; a long strike tightens spot supply.",
+    "timing": "Recorded demo finding: union talks are scheduled within two weeks.",
+    "counter-evidence": "Recorded demo finding: battery makers hold several weeks of inventory.",
+}
+
+
 def _researcher(event_id: str, prompt: str, tools: Any) -> dict:
     tools.research("lite", "chile lithium mine strike exposure")
     tools.check_receipt(PAGE_URL, PASSAGE)
-    return {"answers": {question: "Recorded demo finding." for question in QUESTIONS}, "missing": []}
+    return {"answers": dict(DEMO_ANSWERS), "missing": []}
 
 
 def _analyst(event_id: str, prompt: str, tools: Any) -> dict:
@@ -63,6 +101,33 @@ def _analyst(event_id: str, prompt: str, tools: Any) -> dict:
         "missing": [],
         "changes": [],
     }
+
+
+def prepare(swarm: Swarm) -> None:
+    """Configure a swarm as a self-contained stage demo with staged inputs."""
+    swarm.demo_mode = True
+    swarm.harness.mode = "scripted"
+    swarm.news = NoNews()
+    swarm.quotes = RecordedQuotes(lambda: swarm.clock.now().date())
+    if not swarm.store.holdings():
+        swarm.set_holdings([("TSLA", 0.4), ("ALB", 0.2)])
+    if swarm.store.topic_named("lithium") is None:
+        swarm.add_topic("lithium", ["TSLA", "ALB"])
+
+
+def inject(swarm: Swarm) -> str:
+    """Inject the staged story. Falls back to canned output if the recorded run fails."""
+    if swarm.store.sighting_by_url(STORY.url):
+        return "already"
+    try:
+        run_demo(swarm, "recorded")
+    except Exception:
+        run_demo(swarm, "canned")
+        return "canned"
+    if not swarm.store.theses():
+        run_demo(swarm, "canned")
+        return "canned"
+    return "recorded"
 
 
 def run_demo(swarm: Swarm, mode: str) -> None:
