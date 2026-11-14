@@ -174,3 +174,51 @@ def parse_confidence(value: str) -> Confidence:
 
 def quiet_deadline(last_sighting_at: datetime) -> datetime:
     return last_sighting_at + timedelta(hours=EVENT_QUIET_HOURS)
+
+
+_TOPIC_HINTS: dict[str, tuple[str, ...]] = {
+    "TSLA": ("EV supply chain", "lithium"),
+    "ALB": ("lithium",),
+    "SQM": ("lithium",),
+}
+
+
+def topics_for_holdings(tickers: list[str]) -> list[dict[str, list[str]]]:
+    grouped: dict[str, list[str]] = {}
+    for ticker in tickers:
+        name = ticker.upper()
+        hints = _TOPIC_HINTS.get(name, (name,))
+        for hint in hints:
+            holdings = grouped.setdefault(hint, [])
+            if name not in holdings:
+                holdings.append(name)
+    return [{"name": hint, "holdings": holdings} for hint, holdings in grouped.items()]
+
+
+def holding_effect(ticker: str, title: str) -> dict[str, str]:
+    text = title.lower()
+    symbol = ticker.upper()
+    if "lithium" in text and symbol in {"ALB", "SQM"}:
+        return {
+            "stance": Stance.BULL.value,
+            "action": Action.ADD.value,
+            "direction": "up",
+            "expected": "A tighter lithium market can lift a producer.",
+        }
+    if "lithium" in text and symbol == "TSLA":
+        return {
+            "stance": Stance.BEAR.value,
+            "action": Action.TRIM.value,
+            "direction": "down",
+            "expected": "A tighter lithium market can raise an EV maker's input cost.",
+        }
+    return {
+        "stance": Stance.NEUTRAL.value,
+        "action": Action.HOLD.value,
+        "direction": "flat",
+        "expected": "The evidence does not fix a direction.",
+    }
+
+
+def spend_usd(search_count: int, research_count: int, search_rate: float, research_rate: float) -> float:
+    return search_count * search_rate + research_count * research_rate

@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timezone
 
 from ground_truth.adapters import LiveNews, LivePages, LiveQuotes, LiveYou
+from ground_truth.domain import topics_for_holdings
 from ground_truth.dashboard import serve
 from ground_truth.opencrawl import OpenCrawlBoard, OpenCrawlSessions, cli_run
 from ground_truth.recording_check import allows_start, recording_status
@@ -28,7 +29,7 @@ class _Discord:
 
 class _Llm:
     def suggest_topics(self, tickers: list[str]) -> list[dict]:
-        return []
+        return topics_for_holdings(tickers)
 
     def judge(self, title: str, events: list) -> str:
         return "new"

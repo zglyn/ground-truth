@@ -9,6 +9,13 @@ from urllib.parse import urlparse
 from ground_truth.swarm import Swarm
 
 
+def _cost_line(costs: dict[str, Any]) -> str:
+    counts = f"You.com calls: search {costs['search']}, research {costs['research']}."
+    if not costs.get("priced"):
+        return counts + " Set you_search_usd and you_research_usd to price them."
+    return counts + f" Spend ${costs['spend_usd']:.2f} of ${costs['budget_usd']:.2f} this month."
+
+
 def render_html(view: dict[str, Any]) -> str:
     cards = []
     for thesis in view["theses"]:
@@ -68,7 +75,7 @@ def render_html(view: dict[str, Any]) -> str:
 <header>
   <h1>Market Impact Swarm</h1>
   <p>Track Record {record['correct']} correct of {record['total']}.</p>
-  <p>You.com calls: search {costs['search']}, research {costs['research']}. Dollar rates are not priced here.</p>
+  <p>{_cost_line(costs)}</p>
 </header>
 <section id="theses">{''.join(cards) or '<p>No Thesis yet.</p>'}</section>
 <section id="dismissed"><h2>Dismissed Sightings</h2><ul>{dismissed}</ul></section>
