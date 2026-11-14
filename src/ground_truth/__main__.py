@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import time
@@ -7,35 +8,9 @@ from datetime import datetime, timezone
 
 from ground_truth.adapters import LiveNews, LivePages, LiveQuotes, LiveYou
 from ground_truth.dashboard import serve
-from ground_truth.recording_check import recording_status
+from ground_truth.opencrawl import OpenCrawlBoard, OpenCrawlSessions, cli_run
+from ground_truth.recording_check import allows_start, recording_status
 from ground_truth.swarm import ManualClock, ScriptedHarness, Swarm
-
-
-class _Board:
-    def __init__(self) -> None:
-        self._messages: list[dict[str, str]] = []
-
-    def post(self, text: str) -> dict[str, str]:
-        message = {"id": str(len(self._messages) + 1), "text": text}
-        self._messages.append(message)
-        return message
-
-    def fetch_all(self) -> list[dict[str, str]]:
-        return list(self._messages)
-
-
-class _Sessions:
-    def __init__(self) -> None:
-        self._rows: dict[str, str] = {}
-
-    def store_session(self, session_id: str, text: str) -> None:
-        self._rows[session_id] = text
-
-    def fetch_session(self, session_id: str) -> str:
-        return self._rows[session_id]
-
-    def search(self, query: str) -> list[str]:
-        return [key for key, value in self._rows.items() if query.lower() in value.lower()]
 
 
 class _Discord:
@@ -63,8 +38,18 @@ class _Recording:
     def check(self, harness_name: str) -> dict:
         if harness_name == "cursor":
             return {"ok": False, "detail": "Cursor is not used for the Researcher"}
-        status = recording_status(shutil.which("claude" if harness_name == "claude" else harness_name))
-        return {"ok": status["status"] == "VERIFIED", "detail": status["detail"]}
+        binary = shutil.which("claude" if harness_name == "claude" else harness_name)
+        recorded = None
+        if binary:
+            try:
+                data = cli_run(["search", "claude -p", "--source", "sessions", "--json"])
+            except (OSError, RuntimeError, json.JSONDecodeError):
+                recorded = False
+            else:
+                results = data.get("results")
+                recorded = isinstance(results, list) and len(results) > 0
+        status = recording_status(binary, recorded=recorded)
+        return {"ok": allows_start(status["status"]), "detail": status["detail"]}
 
 
 def main() -> None:
@@ -76,15 +61,16 @@ def main() -> None:
         you=LiveYou(),
         pages=LivePages(),
         quotes=LiveQuotes(),
-        board=_Board(),
-        sessions=_Sessions(),
+        board=OpenCrawlBoard(cli_run),
+        sessions=OpenCrawlSessions(cli_run),
         harness=ScriptedHarness(),
         discord=_Discord(),
         llm=_Llm(),
         recording=_Recording(),
         dashboard_url=os.environ.get("DASHBOARD_URL", "http://127.0.0.1:8080"),
     )
-    swarm.start()
+    status = swarm.start()
+    print(f"recording {status['detail']}", flush=True)
     httpd = serve(swarm)
     print(f"dashboard http://127.0.0.1:{httpd.server_address[1]}/", flush=True)
     while True:

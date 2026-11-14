@@ -10,6 +10,7 @@ services:
       DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
     volumes:
       - swarm-data:/data
+      - ${HOME}/.config/opencrawl:/root/.config/opencrawl:ro
 
 volumes:
   swarm-data:
