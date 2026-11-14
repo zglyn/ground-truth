@@ -1,0 +1,13 @@
+[project]
+name = "ground-truth"
+version = "0.1.0"
+description = "Market Impact Swarm"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

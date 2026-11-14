@@ -1,0 +1,7 @@
+ts	phase	decision	why	evidence	result
+2026-11-14T17:20:00Z	frame	Build issue 1 as one Python package whose seam tests are the done check	The repo had the glossary and two ADRs and no code, and the issue already fixed the module split	https://github.com/zglyn/ground-truth/issues/1	scoped to one writer, the Supervisor
+2026-11-14T17:28:00Z	design	Keep Events, Sightings, and Theses in one sqlite file and fake the harness in tests	ADR-0002 says only the Supervisor creates Events, so two writers would fight over that file	src/ground_truth/store.py	chosen
+2026-11-14T17:40:00Z	verify	Ran the seam suite	The tests drive Swarm.tick and read the dashboard, Discord, and You.com fakes	python3 -m pytest tests/test_seam.py -q	18 passed
+2026-11-14T17:41:00Z	docker	Did not build the image	The docker command is not on this machine	command -v docker	INCONCLUSIVE
+2026-11-14T17:41:00Z	recording	Left the live Claude session unwired	claude is not installed here, and Seam 2 needs a real OpenCrawl fetch	src/ground_truth/recording_check.py	INCONCLUSIVE
+2026-11-14T17:45:00Z	review	Retyped harness scripts as Any and dropped module docstrings	A comment pass flagged object-typed tool arguments and restated docstrings	tests/test_seam.py	18 passed
