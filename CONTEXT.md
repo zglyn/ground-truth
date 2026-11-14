@@ -20,31 +20,47 @@ _Avoid_: Customized field, keyword, interest
 
 ### What happens in the world
 
+**Sighting**:
+One relevant news item the Scout has posted to the swarm, not yet confirmed as part of an Event.
+_Avoid_: Flag, alert, hit
+
 **Event**:
-A single real-world happening (e.g. a lithium mine strike) that may affect one or more Holdings, however many news reports describe it.
+A single real-world happening (e.g. a lithium mine strike) that may affect one or more Holdings, however many Sightings describe it.
 _Avoid_: Disruption, alert, story, news item
 
 ### What the swarm produces
 
 **Thesis**:
-The Analyst's cited judgement on one Event, covering every Holding it affects, with a Stance, a recommended action and the expected impact and direction.
+The Analyst's cited judgement on one Event, made up of a Holding Impact for every Holding the Event affects. A follow-up on the same Event produces a revised Thesis linked to the earlier one.
 _Avoid_: Alert, report, signal, recommendation
 
+**Holding Impact**:
+The part of a Thesis about one Holding: its Stance, recommended Action, expected impact and direction, and confidence.
+_Avoid_: Verdict, call, rating
+
 **Stance**:
-The direction a Thesis takes: Bull, Bear or Neutral.
+The direction a Holding Impact takes: Bull, Bear or Neutral.
 _Avoid_: Sentiment, rating
 
+**Action**:
+What a Holding Impact recommends the user do: Add, Hold, Trim, Exit or Hedge. Advice only, never executed.
+_Avoid_: Trade, order, signal
+
 **Receipt**:
-Evidence for a claim: a source URL, the quoted passage that supports the claim, and when it was retrieved.
+Evidence for a claim: a source URL, the quoted passage that supports the claim (confirmed word-for-word against the page), and when it was retrieved.
 _Avoid_: Citation, link, source
+
+**Inference**:
+A claim in a Thesis that has no Receipt and is labelled as the Analyst's own reasoning.
+_Avoid_: Assumption, opinion
 
 ### The agents
 
 **Scout**:
-The agent that continuously searches news for the Watch Topics and flags relevant items to the swarm.
+The agent that continuously searches news for the Watch Topics and posts Sightings.
 
 **Researcher**:
-An agent assigned to one Event that investigates its second-order effects and gathers Receipts. Several can run at once, one per Event.
+An agent that claims a Sighting, attaches it to an existing or new Event, and investigates that Event's second-order effects to gather Receipts. Several can run at once, one per Event.
 
 **Analyst**:
 The agent that turns a Researcher's findings into a Thesis.
