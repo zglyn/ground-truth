@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from ground_truth.adapters import LiveNews, LivePages, LiveQuotes, LiveYou
 from ground_truth.domain import topics_for_holdings
-from ground_truth.dashboard import serve
+from ground_truth.dashboard import bind_address, serve
 from ground_truth.opencrawl import OpenCrawlBoard, OpenCrawlSessions, cli_run
 from ground_truth.recording_check import allows_start, recording_status
 from ground_truth.swarm import ManualClock, ScriptedHarness, Swarm
@@ -72,8 +72,14 @@ def main() -> None:
     )
     status = swarm.start()
     print(f"recording {status['detail']}", flush=True)
-    httpd = serve(swarm)
-    print(f"dashboard http://127.0.0.1:{httpd.server_address[1]}/", flush=True)
+    host, port = bind_address()
+    try:
+        httpd = serve(swarm, host, port)
+    except OSError as exc:
+        print(f"dashboard failed to listen on {host}:{port}: {exc}", flush=True)
+        raise SystemExit(1) from exc
+    shown = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    print(f"dashboard http://{shown}:{httpd.server_address[1]}/", flush=True)
     while True:
         try:
             swarm.tick()
