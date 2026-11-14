@@ -69,7 +69,7 @@ The coordinating process that keeps the Scout running, matches Sightings to Even
 _Avoid_: Orchestrator, dispatcher, manager
 
 **Scout**:
-The agent that continuously searches news for the Watch Topics and posts Sightings.
+The agent that continuously checks free news sources (news feeds and regulatory filings) for the Watch Topics and posts Sightings.
 
 **Researcher**:
 An agent assigned to one Event by the Supervisor, which investigates the Event's second-order effects, gathers Receipts and writes a Dossier. Several can run at once, one per Event.
