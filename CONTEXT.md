@@ -21,11 +21,11 @@ _Avoid_: Customized field, keyword, interest
 ### What happens in the world
 
 **Sighting**:
-One relevant news item the Scout has posted to the swarm, not yet confirmed as part of an Event. A Researcher either attaches it to an Event or dismisses it with a reason.
+One relevant news item the Scout has posted to the swarm, not yet confirmed as part of an Event. The Supervisor attaches it to an Event or dismisses it with a reason.
 _Avoid_: Flag, alert, hit
 
 **Event**:
-A single real-world happening (e.g. a lithium mine strike) that may affect one or more Holdings, however many Sightings describe it.
+A single real-world happening (e.g. a lithium mine strike) that may affect one or more Holdings, however many Sightings describe it. It closes after 72 hours without a new Sighting; a later mention opens a new, related Event.
 _Avoid_: Disruption, alert, story, news item
 
 ### What the swarm produces
@@ -54,17 +54,25 @@ _Avoid_: Findings, research notes, summary
 Evidence for a claim: a source URL, the quoted passage that supports the claim (confirmed word-for-word against the page), and when it was retrieved.
 _Avoid_: Citation, link, source
 
+**Track Record**:
+The running grade of past Holding Impacts, comparing each Stance with the Holding's actual price move 1, 5 and 20 trading days later.
+_Avoid_: Backtest, accuracy, score
+
 **Inference**:
 A claim in a Thesis that has no Receipt and is labelled as the Analyst's own reasoning.
 _Avoid_: Assumption, opinion
 
 ### The agents
 
+**Supervisor**:
+The coordinating process that keeps the Scout running, matches Sightings to Events, and starts a Researcher and then the Analyst for each Event. It is the only thing that creates Events.
+_Avoid_: Orchestrator, dispatcher, manager
+
 **Scout**:
 The agent that continuously searches news for the Watch Topics and posts Sightings.
 
 **Researcher**:
-An agent that claims a Sighting, attaches it to an existing or new Event, and investigates that Event's second-order effects to gather Receipts. Several can run at once, one per Event.
+An agent assigned to one Event by the Supervisor, which investigates the Event's second-order effects, gathers Receipts and writes a Dossier. Several can run at once, one per Event.
 
 **Analyst**:
 The agent that turns a Researcher's Dossier into a Thesis.
