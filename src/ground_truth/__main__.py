@@ -115,6 +115,8 @@ def main() -> None:
     print(f"recording {status['detail']}", flush=True)
     if swarm.blocked:
         print("research paused: the recording check failed; the dashboard stays up", flush=True)
+    if not demo and not os.environ.get("EDGAR_CONTACT", "").strip():
+        print("SEC filings off: set EDGAR_CONTACT to your name and email to include them", flush=True)
     if swarm.inject_enabled:
         print("test injection on: use the form on the Overview to inject a headline into the live pipeline", flush=True)
     if demo:

@@ -564,3 +564,17 @@ def test_inject_form_feeds_the_live_pipeline(tmp_path: Path) -> None:
     assert view["sightings"][0]["source"] == "injected"
     assert view["theses"], "the injected headline should produce a Thesis"
     assert any(call[0] == "search" for call in env.you.calls)
+
+
+def test_edgar_is_skipped_without_a_contact_and_fetched_once_per_ticker(tmp_path: Path) -> None:
+    env = world(tmp_path)
+    portfolio(env)
+    env.swarm.add_topic("EV supply chain", ["TSLA"])
+    env.swarm.tick()
+    edgar_calls = [call for call in env.news.calls if call[0] == "edgar"]
+    assert sorted(ticker for _, ticker in edgar_calls) == ["ALB", "TSLA"]
+    env.news.calls.clear()
+    env.news.edgar_enabled = False
+    env.swarm.tick()
+    assert not [call for call in env.news.calls if call[0] == "edgar"]
+    assert env.swarm.view()["stages"]["scout"]["state"] == "ok"

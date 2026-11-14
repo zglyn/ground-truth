@@ -27,6 +27,11 @@ def _get(url: str, user_agent: str = USER_AGENT) -> bytes:
 
 
 class LiveNews:
+    @property
+    def edgar_enabled(self) -> bool:
+        """The SEC blocks automated requests that do not name a contact, so EDGAR is off without one."""
+        return bool(os.environ.get("EDGAR_CONTACT", "").strip())
+
     def google_news(self, topic: str) -> list[NewsItem]:
         query = urllib.parse.quote(topic)
         url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"

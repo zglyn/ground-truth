@@ -581,12 +581,18 @@ class Swarm:
             except Exception as exc:
                 failures.append(f"{label}: {type(exc).__name__}: {exc}")
 
+        filed: set[str] = set()
         for topic in self.store.topics("active"):
             name = topic["name"]
             fetch(f"Google News '{name}'", lambda name=name: self.news.google_news(name), name, "google-news")
             for feed in topic["feeds"]:
                 fetch(f"feed {feed}", lambda feed=feed: self.news.rss(feed), name, "rss")
+            if not getattr(self.news, "edgar_enabled", True):
+                continue
             for ticker in topic["holdings"]:
+                if ticker in filed:
+                    continue
+                filed.add(ticker)
                 fetch(f"SEC EDGAR {ticker}", lambda ticker=ticker: self.news.edgar(ticker), name, "sec-edgar")
         return items, failures, attempted
 
