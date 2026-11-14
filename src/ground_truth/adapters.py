@@ -9,11 +9,18 @@ from datetime import date
 
 from ground_truth.domain import NewsItem, Quote
 
-USER_AGENT = "GroundTruth/0.1 (research; contact=local)"
+def edgar_user_agent(contact: str | None = None) -> str:
+    name = (contact if contact is not None else os.environ.get("EDGAR_CONTACT", "")).strip()
+    if name:
+        return f"GroundTruth/0.1 ({name})"
+    return "GroundTruth/0.1 (set EDGAR_CONTACT)"
 
 
-def _get(url: str) -> bytes:
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+USER_AGENT = "GroundTruth/0.1 (research)"
+
+
+def _get(url: str, user_agent: str = USER_AGENT) -> bytes:
+    request = urllib.request.Request(url, headers={"User-Agent": user_agent})
     with urllib.request.urlopen(request, timeout=30) as response:
         return response.read()
 
@@ -32,7 +39,7 @@ class LiveNews:
             {"action": "getcompany", "CIK": ticker, "type": "", "dateb": "", "owner": "include", "count": "10", "output": "atom"}
         )
         url = f"https://www.sec.gov/cgi-bin/browse-edgar?{query}"
-        return _rss_items(_get(url), "sec-edgar")
+        return _rss_items(_get(url, edgar_user_agent()), "sec-edgar")
 
 
 def _rss_items(payload: bytes, source: str) -> list[NewsItem]:

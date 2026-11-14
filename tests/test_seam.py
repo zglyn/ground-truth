@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from ground_truth.dashboard import render_html, serve
+from ground_truth.adapters import edgar_user_agent
+from ground_truth.__main__ import _Llm
 from ground_truth.domain import QUESTIONS, NewsItem
 from ground_truth.opencrawl import OpenCrawlBoard, OpenCrawlSessions
 from ground_truth.recording_check import allows_start, recording_status
@@ -543,6 +545,28 @@ def test_opencrawl_board_creates_one_event(tmp_path: Path) -> None:
     sessions = OpenCrawlSessions(cli)
     assert sessions.search("lithium strike") == ["sessions:past-strike"]
     assert sessions.fetch_session("sessions:past-strike") == "earlier strike"
+
+
+def test_default_path_prices_a_lithium_strike(tmp_path: Path) -> None:
+    env = world(tmp_path)
+    portfolio(env)
+    env.swarm.store.set_setting("you_search_usd", "0.50")
+    env.swarm.store.set_setting("you_research_usd", "2")
+    env.swarm.store.set_setting("monthly_budget_usd", "25")
+    env.swarm.llm = _Llm()
+    names = {item["name"] for item in env.swarm.suggest_topics()}
+    assert "lithium" in names
+    assert "EV supply chain" in names
+    env.swarm.inject_news(story("Chile lithium mine strike cuts supply"))
+    env.swarm.tick()
+    impacts = {impact["ticker"]: impact["stance"] for impact in env.swarm.view()["theses"][-1]["impacts"]}
+    assert impacts == {"TSLA": "Bear", "ALB": "Bull"}
+    assert env.swarm.view()["theses"][-1]["claims"][0]["kind"] == "inference"
+    assert 1 <= env.swarm.view()["costs"]["research"] <= 4
+    html = render_html(env.swarm.view())
+    assert "Spend $4.50 of $25.00 this month." in html
+    assert edgar_user_agent("Li yan <research@example.com>") == "GroundTruth/0.1 (Li yan <research@example.com>)"
+    assert edgar_user_agent("") == "GroundTruth/0.1 (set EDGAR_CONTACT)"
 
 
 def test_time_budget_stops_research(tmp_path: Path) -> None:

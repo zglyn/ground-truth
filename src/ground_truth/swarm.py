@@ -18,11 +18,13 @@ from ground_truth.domain import (
     cap_confidence,
     classify_sighting,
     grade_stance,
+    holding_effect,
     parse_action,
     parse_confidence,
     parse_stance,
     portfolio_color,
     portfolio_net,
+    spend_usd,
     previous_trading_day,
     quiet_deadline,
 )
@@ -316,14 +318,29 @@ class Swarm:
                 "correct": correct,
                 "total": len(grades),
             },
-            "costs": {
-                "search": self.store.costs().get("search", 0),
-                "research": self.store.costs().get("research", 0),
-            },
+            "costs": self._cost_view(),
             "recording": self.recording,
             "scout_interval_seconds": SCOUT_INTERVAL_SECONDS,
             "alert_weight": float(self.store.setting("alert_weight", "0.25")),
             "orders": [],
+        }
+
+    def _cost_view(self) -> dict[str, Any]:
+        counts = self.store.costs()
+        search_count = counts.get("search", 0)
+        research_count = counts.get("research", 0)
+        search_raw = self.store.setting("you_search_usd", "")
+        research_raw = self.store.setting("you_research_usd", "")
+        budget_raw = self.store.setting("monthly_budget_usd", "25")
+        priced = search_raw != "" and research_raw != ""
+        search_rate = float(search_raw) if search_raw else 0.0
+        research_rate = float(research_raw) if research_raw else 0.0
+        return {
+            "search": search_count,
+            "research": research_count,
+            "priced": priced,
+            "spend_usd": spend_usd(search_count, research_count, search_rate, research_rate),
+            "budget_usd": float(budget_raw or "25"),
         }
 
     def _scout(self) -> None:
@@ -496,6 +513,7 @@ class Swarm:
             {
                 "role": "analyst",
                 "event": event_id,
+                "title": event["title"],
                 "session": event["dossier_session"],
                 "revision": previous is not None,
                 "holdings": self.store.event_holdings(event_id),
@@ -635,8 +653,72 @@ class ScriptedHarness:
                 self._current -= 1
 
 
+def _call_research(tools: Toolset, tier: str, query: str) -> dict[str, Any]:
+    try:
+        return tools.research(tier, query)
+    except Exception:
+        return {"error": "unavailable"}
+
+
+def _keep_receipts(tools: Toolset, payload: dict[str, Any]) -> None:
+    for source in payload.get("sources") or []:
+        if not isinstance(source, dict):
+            continue
+        url = source.get("url")
+        passage = source.get("passage")
+        if isinstance(url, str) and isinstance(passage, str) and url and passage:
+            tools.check_receipt(url, passage)
+
+
+def _research_event(info: dict[str, Any], tools: Toolset) -> dict[str, Any]:
+    title = str(info.get("title") or "")
+    tools.search_memory(title)
+    lite = _call_research(tools, "lite", title)
+    _keep_receipts(tools, lite)
+    holdings = [str(ticker) for ticker in info.get("holdings") or []]
+    affected = any(holding_effect(ticker, title)["stance"] != "Neutral" for ticker in holdings)
+    standard: dict[str, Any] = {}
+    if affected and not lite.get("error"):
+        standard = _call_research(tools, "standard", f"counter-evidence {title}")
+        _keep_receipts(tools, standard)
+    answers = {
+        "exposure": str(lite.get("text") or ""),
+        "magnitude": str(lite.get("text") or ""),
+        "timing": "",
+        "counter-evidence": str(standard.get("text") or ""),
+    }
+    missing = [question for question in QUESTIONS if not answers[question].strip()]
+    if lite.get("error"):
+        missing = list(QUESTIONS)
+    return {"answers": answers, "missing": missing, "claims": []}
+
+
+def _analyze_event(info: dict[str, Any], tools: Toolset) -> dict[str, Any]:
+    receipt_ids: list[str] = []
+    session_id = str(info.get("session") or "")
+    if session_id:
+        try:
+            body = json.loads(tools.fetch_session(session_id))
+        except (KeyError, json.JSONDecodeError, TypeError):
+            body = {}
+        if isinstance(body, dict):
+            receipt_ids = [item for item in body.get("receipts") or [] if isinstance(item, str)]
+    event_title = str(info.get("title") or "")
+    impacts = []
+    for ticker in info.get("holdings") or []:
+        tools.quote(str(ticker))
+        effect = holding_effect(str(ticker), event_title)
+        impacts.append({"ticker": ticker, "confidence": "low", **effect})
+    if receipt_ids:
+        claims = [{"text": event_title or "Recorded finding.", "receipt_id": receipt_ids[0]}]
+    else:
+        claims = [{"text": "No passage was confirmed against a source page.", "receipt_id": None}]
+    changes = ["New Sighting attached"] if info.get("revision") else []
+    return {"impacts": impacts, "claims": claims, "missing": [], "changes": changes}
+
+
 def _default_script(event_id: str, prompt: str, tools: Toolset) -> dict[str, Any]:
     info = json.loads(prompt)
     if info["role"] == "researcher":
-        return {"answers": {}, "missing": [], "claims": []}
-    return {"impacts": [], "claims": [{"text": "No scripted analysis.", "receipt_id": None}], "missing": [], "changes": []}
+        return _research_event(info, tools)
+    return _analyze_event(info, tools)
