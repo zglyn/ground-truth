@@ -5,3 +5,5 @@ ts	phase	decision	why	evidence	result
 2026-11-14T17:41:00Z	docker	Did not build the image	The docker command is not on this machine	command -v docker	INCONCLUSIVE
 2026-11-14T17:41:00Z	recording	Left the live Claude session unwired	claude is not installed here, and Seam 2 needs a real OpenCrawl fetch	src/ground_truth/recording_check.py	INCONCLUSIVE
 2026-11-14T17:45:00Z	review	Retyped harness scripts as Any and dropped module docstrings	A comment pass flagged object-typed tool arguments and restated docstrings	tests/test_seam.py	18 passed
+2026-11-14T18:22:39Z	live-board	The live process posts and reads the OpenCrawl board, and a missing harness reports FALLBACK	No claude or codex binary is installed, so ADR-0001's custom-code path is the one that can run, and the board is the part OpenCrawl can carry	src/ground_truth/opencrawl.py	19 passed
+2026-11-14T18:22:39Z	docker	Built ground-truth:local and ran the recording check inside it	The earlier build was skipped because docker was not installed. The daemon starts with dockerd, and the image includes the OpenCrawl CLI	sudo docker build -t ground-truth:local .	image prints FALLBACK, opencrawl 0.4.66

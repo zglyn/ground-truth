@@ -9,6 +9,7 @@ from typing import Any
 
 from ground_truth.dashboard import render_html, serve
 from ground_truth.domain import QUESTIONS, NewsItem
+from ground_truth.opencrawl import OpenCrawlBoard, OpenCrawlSessions
 from ground_truth.recording_check import recording_status
 from ground_truth.swarm import ManualClock, ScriptedHarness, Swarm
 from tests.fakes import (
@@ -466,11 +467,79 @@ def test_recording_check_and_cursor_rejection(tmp_path: Path) -> None:
     except ValueError:
         raised = True
     assert raised
-    assert recording_status(None)["status"] == "INCONCLUSIVE"
+    assert recording_status(None)["status"] == "FALLBACK"
+    assert recording_status("/usr/bin/claude", recorded=True)["status"] == "VERIFIED"
+    assert recording_status("/usr/bin/claude", recorded=False)["status"] == "MISSING"
     from ground_truth.recording_check import claude_argv
 
     assert claude_argv("investigate the event") == ["claude", "-p", "investigate the event"]
     assert "--bare" not in claude_argv("investigate the event")
+
+
+class _BoardCli:
+    def __init__(self) -> None:
+        self.published: list[dict[str, str]] = []
+        self.pending: list[dict[str, str]] = []
+
+    def __call__(self, args: list[str]) -> dict:
+        if args[:2] == ["board", "publish"]:
+            text = args[args.index("--text") + 1]
+            post_id = args[args.index("--id") + 1]
+            message = {"id": post_id, "text": text}
+            self.published.append(message)
+            self.pending.append(dict(message))
+            return {"id": post_id}
+        if args[:2] == ["board", "inbox"]:
+            if not self.pending:
+                return {"batch": None}
+            messages = self.pending
+            self.pending = []
+            return {"batch": {"receipt": "a" * 64, "messages": messages}}
+        if args[:1] == ["search"]:
+            return {"results": [{"id": "sessions:past-strike"}]}
+        if args[:1] == ["fetch"]:
+            return {"text": "earlier strike"}
+        return {}
+
+
+def test_opencrawl_board_creates_one_event(tmp_path: Path) -> None:
+    cli = _BoardCli()
+    board = OpenCrawlBoard(cli)
+    first = board.post('{"k":"sighting","id":"s1"}')
+    second = board.post('{"k":"sighting","id":"s1"}')
+    assert first["id"] == second["id"]
+    assert [item["text"] for item in board.fetch_all()] == [first["text"], second["text"]]
+    assert board.fetch_all() == []
+
+    env = world(tmp_path)
+    env.swarm = Swarm(
+        str(tmp_path / "board.sqlite"),
+        clock=env.clock,
+        news=env.news,
+        you=env.you,
+        pages=env.pages,
+        quotes=env.quotes,
+        board=OpenCrawlBoard(cli),
+        sessions=OpenCrawlSessions(cli),
+        harness=env.harness,
+        discord=env.discord,
+        llm=env.llm,
+        recording=env.recording,
+    )
+    portfolio(env)
+    env.swarm.inject_news(story("Chile lithium mine strike cuts supply"))
+    env.swarm.tick()
+    view = env.swarm.view()
+    assert len(view["events"]) == 1
+    sighting_id = view["sightings"][0]["id"]
+    posted = [json.loads(item["text"]) for item in cli.published]
+    assert {"k": "sighting", "id": sighting_id} in posted
+    cli.pending = [item for item in cli.published if json.loads(item["text"]).get("k") == "sighting"]
+    env.swarm.tick()
+    assert len(env.swarm.view()["events"]) == 1
+    sessions = OpenCrawlSessions(cli)
+    assert sessions.search("lithium strike") == ["sessions:past-strike"]
+    assert sessions.fetch_session("sessions:past-strike") == "earlier strike"
 
 
 def test_time_budget_stops_research(tmp_path: Path) -> None:
