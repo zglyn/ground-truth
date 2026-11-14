@@ -194,6 +194,7 @@ class Dashboard:
     stages: dict[str, dict[str, Any]]
     headlines: dict[str, str] = field(default_factory=dict)
     demo: bool = False
+    inject_enabled: bool = False
 
     def latest_per_event(self) -> list[ThesisCard]:
         latest: dict[str, ThesisCard] = {}
@@ -372,4 +373,5 @@ def build(view: dict[str, Any]) -> Dashboard:
         stages=dict(view.get("stages") or {}),
         headlines=headlines,
         demo=bool(view.get("demo")),
+        inject_enabled=bool(view.get("inject_enabled")),
     )

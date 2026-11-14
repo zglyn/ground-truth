@@ -27,6 +27,9 @@ ERRORS = {
     "you_research_usd": "Enter a dollar amount of zero or more, or leave it blank.",
     "monthly_budget_usd": "Enter a monthly budget of zero dollars or more.",
     "action": "That action is not available.",
+    "headline": "Enter a headline to inject.",
+    "inject_topic": "Choose an active Watch Topic.",
+    "url": "Enter an address starting with http:// or https://, or leave it blank.",
 }
 PAGES = ("/", "/portfolio", "/track-record", "/settings")
 
@@ -212,6 +215,30 @@ def _demo_inject(swarm: Swarm, fields: Fields) -> Outcome:
     return Outcome(saved={"recorded": "demo", "canned": "demo-canned", "already": "demo-already"}[inject(swarm)])
 
 
+def _inject_headline(swarm: Swarm, fields: Fields) -> Outcome:
+    if not swarm.inject_enabled:
+        return Outcome({"_form": ERRORS["action"]})
+    import uuid
+
+    from ground_truth.domain import NewsItem
+
+    headline = _one(fields, "headline")
+    topic = _one(fields, "topic")
+    url = _one(fields, "url")
+    bad = []
+    if not headline:
+        bad.append("headline")
+    if swarm.store.topic_named(topic) is None:
+        bad.append("inject_topic")
+    if url and (urlparse(url).scheme not in ("http", "https") or not urlparse(url).netloc):
+        bad.append("url")
+    if bad:
+        return _err(*bad)
+    swarm.inject_news(NewsItem(headline, url or f"https://injected.test/{uuid.uuid4().hex}", "injected", topic))
+    swarm.run_now()
+    return Outcome(saved="injected")
+
+
 def _run_now(swarm: Swarm, fields: Fields) -> Outcome:
     return Outcome(saved="run" if swarm.run_now() else "running")
 
@@ -227,6 +254,7 @@ COMMANDS: dict[str, Callable[[Swarm, Fields], Outcome]] = {
     "save_settings": _save_settings,
     "run_now": _run_now,
     "demo_inject": _demo_inject,
+    "inject_headline": _inject_headline,
 }
 
 
@@ -253,7 +281,7 @@ def render_page(
         stance = (query.get("stance") or [""])[0]
         if stance not in ("", "Bull", "Bear", "Neutral"):
             stance = ""
-        return 200, render.overview(dash, holding=holding, stance=stance, notice=notice)
+        return 200, render.overview(dash, holding=holding, stance=stance, notice=notice, state=state)
     if path == "/portfolio":
         return 200, render.portfolio(dash, state, notice=notice)
     if path == "/track-record":

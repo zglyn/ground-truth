@@ -156,6 +156,8 @@ class Swarm:
         self.recording_probe = recording
         self.dashboard_url = dashboard_url
         self.injected: list[Any] = []
+        self._inject_lock = threading.Lock()
+        self.inject_enabled = False
         self._tick_lock = threading.Lock()
         self.recording: dict[str, Any] = {"ok": False, "detail": "not checked"}
         self.blocked = False
@@ -241,7 +243,8 @@ class Swarm:
         self.store.set_setting("alert_weight", str(finite_unit(weight, "alert_weight")))
 
     def inject_news(self, item: Any) -> None:
-        self.injected.append(item)
+        with self._inject_lock:
+            self.injected.append(item)
 
     def run_demo(self, mode: str) -> None:
         from ground_truth.demo import run_demo
@@ -450,6 +453,7 @@ class Swarm:
             },
             "now": self.clock.now().isoformat(),
             "demo": self.demo_mode,
+            "inject_enabled": self.inject_enabled,
             "orders": [],
         }
 
@@ -564,8 +568,8 @@ class Swarm:
         return None
 
     def _gather(self) -> tuple[list[Any], list[str], int]:
-        items = list(self.injected)
-        self.injected.clear()
+        with self._inject_lock:
+            items, self.injected = list(self.injected), []
         failures: list[str] = []
         attempted = 0
 

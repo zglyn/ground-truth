@@ -96,6 +96,7 @@ def main() -> None:
         prepare(swarm)
     else:
         swarm = build_swarm()
+    swarm.inject_enabled = "--inject" in sys.argv[1:] and not demo
     host, port = bind_address()
     try:
         httpd = serve(swarm, host, port)
@@ -114,6 +115,8 @@ def main() -> None:
     print(f"recording {status['detail']}", flush=True)
     if swarm.blocked:
         print("research paused: the recording check failed; the dashboard stays up", flush=True)
+    if swarm.inject_enabled:
+        print("test injection on: use the form on the Overview to inject a headline into the live pipeline", flush=True)
     if demo:
         print("demo mode: staged inputs only. Use the button on the Overview to inject the story.", flush=True)
     while True:

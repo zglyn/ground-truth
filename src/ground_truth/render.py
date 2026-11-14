@@ -23,6 +23,7 @@ SAVED = {
     "running": "A check is already running.",
     "demo": "Staged story injected. The swarm grouped it, researched it and wrote the Thesis below.",
     "demo-canned": "The recorded run failed, so the canned fallback Thesis is shown.",
+    "injected": "Test headline injected. A check is running with live You.com calls; refresh in a minute.",
     "demo-already": "The staged story was already injected. Restart with a fresh demo database to run it again.",
 }
 
@@ -378,7 +379,42 @@ def _aside(dash: Dashboard) -> str:
     )
 
 
-def overview(dash: Dashboard, *, holding: str = "", stance: str = "", notice: str = "") -> str:
+def _inject_panel(dash: Dashboard, state: FormState | None) -> str:
+    if not dash.inject_enabled:
+        return ""
+    form_id = "inject"
+    topics = dash.active_topics()
+    if not topics:
+        return (
+            '<div class="notice notice-warn"><h2>Test injection</h2>'
+            '<p><a href="/portfolio#topics">Accept a Watch Topic</a> first. An injected headline is filed under one.</p></div>'
+        )
+    current = _active(state, form_id)
+    chosen = current.value("topic") if current else topics[0].name
+    error = current.errors.get("inject_topic", "") if current else ""
+    options = "".join(
+        f'<option value="{esc(topic.name)}"{" selected" if topic.name == chosen else ""}>'
+        f'{esc(topic.name)} ({esc(", ".join(topic.holdings))})</option>'
+        for topic in topics
+    )
+    error_html = f'<span class="error" id="inject-topic-error">{esc(error)}</span>' if error else ""
+    return (
+        '<div class="notice notice-warn"><h2>Test injection</h2>'
+        "<p>Feeds a headline into the live pipeline as if the Scout had found it. "
+        "Corroboration, research, prices and alerts are real, and You.com calls cost money. "
+        "Injected Sightings are labelled as injected.</p>"
+        f"{_form_error_summary(state, form_id)}{_form_open(form_id, 'inject_headline', '/')}"
+        f'{_input(form_id, "headline", "Headline", "Chile lithium mine strike cuts supply", state)}'
+        f'<div class="field"><label for="inject-topic">Watch Topic</label>{error_html}'
+        f'<select id="inject-topic" name="topic">{options}</select></div>'
+        f'{_input(form_id, "url", "Article address (optional)", "", state, hint="A real article lets the Receipt check verify quotes against it.")}'
+        "<button>Inject headline</button></form></div>"
+    )
+
+
+def overview(
+    dash: Dashboard, *, holding: str = "", stance: str = "", notice: str = "", state: FormState | None = None
+) -> str:
     cards = dash.latest_per_event()
     if holding:
         cards = [card for card in cards if any(impact.ticker == holding for impact in card.impacts)]
@@ -409,7 +445,7 @@ def overview(dash: Dashboard, *, holding: str = "", stance: str = "", notice: st
             f'{_form_open("demo", "demo_inject", "/")}<button>Inject breaking news: Chile lithium mine strike</button></form></div>'
         )
     body = (
-        f"{demo}{_failure_banner(dash, '/')}"
+        f"{demo}{_inject_panel(dash, state)}{_failure_banner(dash, '/')}"
         f'<div class="layout"><div>{main}{dismissed_html}</div>{_aside(dash)}</div>'
     )
     return page(dash, "Overview", "/", body, notice=notice)

@@ -541,3 +541,26 @@ def test_demo_mode_injects_the_staged_story(tmp_path: Path) -> None:
     assert len(env.discord.sent) == 1 and "TSLA" in env.discord.sent[0]["text"]
     assert inject(env.swarm) == "already"
     assert len(env.swarm.view()["theses"]) == 1
+
+
+def test_inject_form_feeds_the_live_pipeline(tmp_path: Path) -> None:
+    from ground_truth.dashboard import apply_command
+
+    env = world(tmp_path)
+    portfolio(env)
+    assert "Test injection" not in render_page(build(env.swarm.view()), "/", {})[1]
+    assert apply_command(env.swarm, {"action": ["inject_headline"], "headline": ["x"], "topic": ["lithium"]}).errors
+    env.swarm.inject_enabled = True
+    page = render_page(build(env.swarm.view()), "/", {})[1]
+    assert "Test injection" in page and "lithium (TSLA, ALB)" in page
+    bad = apply_command(env.swarm, {"action": ["inject_headline"], "headline": [""], "topic": ["nope"], "url": ["ftp://x"]})
+    assert set(bad.errors) == {"headline", "inject_topic", "url"}
+    ok = apply_command(env.swarm, {"action": ["inject_headline"], "headline": ["Chile lithium mine strike cuts supply"], "topic": ["lithium"]})
+    assert ok.saved == "injected"
+    deadline = time.time() + 5
+    while time.time() < deadline and not env.swarm.view()["theses"]:
+        time.sleep(0.05)
+    view = env.swarm.view()
+    assert view["sightings"][0]["source"] == "injected"
+    assert view["theses"], "the injected headline should produce a Thesis"
+    assert any(call[0] == "search" for call in env.you.calls)
