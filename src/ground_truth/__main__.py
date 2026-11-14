@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from ground_truth.adapters import LiveNews, LivePages, LiveQuotes, LiveYou
 from ground_truth.dashboard import serve
 from ground_truth.opencrawl import OpenCrawlBoard, OpenCrawlSessions, cli_run
-from ground_truth.recording_check import recording_status
+from ground_truth.recording_check import allows_start, recording_status
 from ground_truth.swarm import ManualClock, ScriptedHarness, Swarm
 
 
@@ -49,7 +49,7 @@ class _Recording:
                 results = data.get("results")
                 recorded = isinstance(results, list) and len(results) > 0
         status = recording_status(binary, recorded=recorded)
-        return {"ok": status["status"] == "VERIFIED", "detail": status["detail"]}
+        return {"ok": allows_start(status["status"]), "detail": status["detail"]}
 
 
 def main() -> None:

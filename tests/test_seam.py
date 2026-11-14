@@ -10,7 +10,7 @@ from typing import Any
 from ground_truth.dashboard import render_html, serve
 from ground_truth.domain import QUESTIONS, NewsItem
 from ground_truth.opencrawl import OpenCrawlBoard, OpenCrawlSessions
-from ground_truth.recording_check import recording_status
+from ground_truth.recording_check import allows_start, recording_status
 from ground_truth.swarm import ManualClock, ScriptedHarness, Swarm
 from tests.fakes import (
     FakeBoard,
@@ -470,6 +470,9 @@ def test_recording_check_and_cursor_rejection(tmp_path: Path) -> None:
     assert recording_status(None)["status"] == "FALLBACK"
     assert recording_status("/usr/bin/claude", recorded=True)["status"] == "VERIFIED"
     assert recording_status("/usr/bin/claude", recorded=False)["status"] == "MISSING"
+    assert allows_start("FALLBACK") is True
+    assert allows_start("VERIFIED") is True
+    assert allows_start("MISSING") is False
     from ground_truth.recording_check import claude_argv
 
     assert claude_argv("investigate the event") == ["claude", "-p", "investigate the event"]

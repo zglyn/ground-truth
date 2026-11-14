@@ -24,6 +24,10 @@ def recording_status(claude_path: str | None, *, recorded: bool | None = None) -
     }
 
 
+def allows_start(status: str) -> bool:
+    return status in {"VERIFIED", "FALLBACK"}
+
+
 def main() -> None:
     print(json.dumps(recording_status(shutil.which("claude"))))
 
