@@ -597,7 +597,7 @@ def test_dashboard_escapes_sighting_titles(tmp_path: Path) -> None:
 
 
 def test_local_dashboard_saves_portfolio_and_opens_thesis(tmp_path: Path) -> None:
-    assert bind_address({}) == ("127.0.0.1", 8080)
+    assert bind_address({}) == ("0.0.0.0", 8080)
     assert bind_address({"DASHBOARD_HOST": "0.0.0.0", "DASHBOARD_PORT": "8080"}) == ("0.0.0.0", 8080)
     compose = Path("docker-compose.yml").read_text()
     assert "DASHBOARD_HOST: 0.0.0.0" in compose

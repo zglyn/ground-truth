@@ -12,7 +12,10 @@ TOPIC = "swarm"
 
 
 def cli_run(args: list[str]) -> dict[str, Any]:
-    completed = subprocess.run(["opencrawl", *args], check=False, capture_output=True, text=True)
+    try:
+        completed = subprocess.run(["opencrawl", *args], check=False, capture_output=True, text=True, timeout=20)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("opencrawl timed out") from exc
     if completed.returncode != 0:
         raise RuntimeError(f"opencrawl exited {completed.returncode}")
     payload = json.loads(completed.stdout or "{}")

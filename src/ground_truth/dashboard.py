@@ -25,7 +25,7 @@ _ERRORS = {
 
 def bind_address(environ: dict[str, str] | None = None) -> tuple[str, int]:
     source = os.environ if environ is None else environ
-    host = source.get("DASHBOARD_HOST", "127.0.0.1") or "127.0.0.1"
+    host = source.get("DASHBOARD_HOST", "0.0.0.0") or "0.0.0.0"
     port = int(source.get("DASHBOARD_PORT", "8080") or "8080")
     return host, port
 

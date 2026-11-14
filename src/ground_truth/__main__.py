@@ -70,8 +70,6 @@ def main() -> None:
         recording=_Recording(),
         dashboard_url=os.environ.get("DASHBOARD_URL", "http://127.0.0.1:8080"),
     )
-    status = swarm.start()
-    print(f"recording {status['detail']}", flush=True)
     host, port = bind_address()
     try:
         httpd = serve(swarm, host, port)
@@ -80,6 +78,11 @@ def main() -> None:
         raise SystemExit(1) from exc
     shown = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
     print(f"dashboard http://{shown}:{httpd.server_address[1]}/", flush=True)
+    try:
+        status = swarm.start()
+    except Exception as exc:
+        status = {"detail": f"recording check failed: {exc}"}
+    print(f"recording {status['detail']}", flush=True)
     while True:
         try:
             swarm.tick()
