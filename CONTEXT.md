@@ -21,7 +21,7 @@ _Avoid_: Customized field, keyword, interest
 ### What happens in the world
 
 **Sighting**:
-One relevant news item the Scout has posted to the swarm, not yet confirmed as part of an Event.
+One relevant news item the Scout has posted to the swarm, not yet confirmed as part of an Event. A Researcher either attaches it to an Event or dismisses it with a reason.
 _Avoid_: Flag, alert, hit
 
 **Event**:
@@ -46,6 +46,10 @@ _Avoid_: Sentiment, rating
 What a Holding Impact recommends the user do: Add, Hold, Trim, Exit or Hedge. Advice only, never executed.
 _Avoid_: Trade, order, signal
 
+**Dossier**:
+A Researcher's complete record of findings and Receipts for one Event, which the Analyst reads to write the Thesis.
+_Avoid_: Findings, research notes, summary
+
 **Receipt**:
 Evidence for a claim: a source URL, the quoted passage that supports the claim (confirmed word-for-word against the page), and when it was retrieved.
 _Avoid_: Citation, link, source
@@ -63,4 +67,4 @@ The agent that continuously searches news for the Watch Topics and posts Sightin
 An agent that claims a Sighting, attaches it to an existing or new Event, and investigates that Event's second-order effects to gather Receipts. Several can run at once, one per Event.
 
 **Analyst**:
-The agent that turns a Researcher's findings into a Thesis.
+The agent that turns a Researcher's Dossier into a Thesis.
