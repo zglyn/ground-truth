@@ -35,7 +35,7 @@ The Analyst's cited judgement on one Event, made up of a Holding Impact for ever
 _Avoid_: Alert, report, signal, recommendation
 
 **Holding Impact**:
-The part of a Thesis about one Holding: its Stance, recommended Action, expected impact and direction, and confidence.
+The part of a Thesis about one Holding: its Stance, recommended Action, expected impact and direction, how the market has already reacted, and confidence.
 _Avoid_: Verdict, call, rating
 
 **Stance**:
