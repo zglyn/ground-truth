@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import json
 import threading
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ground_truth.dashboard import bind_address, render_html, serve
+from ground_truth.dashboard import bind_address, render_html, render_page, serve
+from ground_truth.views import build
 from ground_truth.adapters import edgar_user_agent
 from ground_truth.__main__ import _Llm
 from ground_truth.domain import QUESTIONS, NewsItem
@@ -126,7 +128,9 @@ def test_groups_sightings_and_dismisses_irrelevant(tmp_path: Path) -> None:
     assert len(view["events"]) == 1
     assert len([row for row in view["sightings"] if row["outcome"] == "attached"]) == 2
     assert view["dismissed"][0]["reason"] == "unrelated to Watch Topic lithium"
-    assert len([run for run in env.harness.runs if run[0] == "researcher"]) == 1
+    researched = [run for run in env.harness.runs if run[0] == "researcher"]
+    assert len({event_id for _, event_id in researched}) == 1
+    assert [dossier["version"] for dossier in view["events"][0]["dossiers"]] == [1, 2]
 
 
 def test_ambiguous_match_uses_the_model(tmp_path: Path) -> None:
@@ -324,7 +328,10 @@ def test_revision_links_the_previous_thesis(tmp_path: Path) -> None:
     env = world(tmp_path)
     portfolio(env)
 
+    prompts: list[dict] = []
+
     def researcher(event_id: str, prompt: str, tools: Any) -> dict:
+        prompts.append(json.loads(prompt))
         return {"answers": answered(), "missing": []}
 
     env.harness.on("researcher", researcher)
@@ -337,7 +344,10 @@ def test_revision_links_the_previous_thesis(tmp_path: Path) -> None:
     assert len(theses) == 2
     assert theses[1]["version"] == 2
     assert theses[1]["previous_id"] == first["id"]
-    assert theses[1]["changes"] == ["New Sighting attached"]
+    assert theses[1]["changes"] == ["New Sighting attached: Chile lithium mine strike spreads further"]
+    assert prompts[1]["revision"] is True
+    assert prompts[1]["new_sightings"] == ["Chile lithium mine strike spreads further"]
+    assert theses[1]["dossier_version"] == 2
 
 
 def test_discord_threshold(tmp_path: Path) -> None:
@@ -556,15 +566,15 @@ def test_default_path_prices_a_lithium_strike(tmp_path: Path) -> None:
     env.swarm.store.set_setting("monthly_budget_usd", "25")
     env.swarm.llm = _Llm()
     names = {item["name"] for item in env.swarm.suggest_topics()}
-    assert "lithium" in names
-    assert "EV supply chain" in names
+    assert names == {"EV supply chain"}
+    assert env.swarm.suggest_topics() == []
     env.swarm.inject_news(story("Chile lithium mine strike cuts supply"))
     env.swarm.tick()
     impacts = {impact["ticker"]: impact["stance"] for impact in env.swarm.view()["theses"][-1]["impacts"]}
     assert impacts == {"TSLA": "Bear", "ALB": "Bull"}
     assert env.swarm.view()["theses"][-1]["claims"][0]["kind"] == "inference"
     assert 1 <= env.swarm.view()["costs"]["research"] <= 4
-    html = render_html(env.swarm.view())
+    _, html = render_page(build(env.swarm.view()), "/settings", {})
     assert "Spend $4.50 of $25.00 this month." in html
     assert edgar_user_agent("Li yan <research@example.com>") == "GroundTruth/0.1 (Li yan <research@example.com>)"
     assert edgar_user_agent("") == "GroundTruth/0.1 (set EDGAR_CONTACT)"
@@ -611,26 +621,37 @@ def test_local_dashboard_saves_portfolio_and_opens_thesis(tmp_path: Path) -> Non
     host, port = httpd.server_address
     base = f"http://{host}:{port}"
 
-    def post(fields: dict[str, str]) -> str:
-        data = urllib.parse.urlencode(fields).encode()
+    def post(fields: dict[str, Any]) -> tuple[int, str]:
+        data = urllib.parse.urlencode(fields, doseq=True).encode()
         request = urllib.request.Request(base + "/", data=data, method="POST")
-        with urllib.request.urlopen(request) as response:
-            return response.read().decode()
+        try:
+            with urllib.request.urlopen(request) as response:
+                return response.status, response.read().decode()
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read().decode()
 
-    page = post({"action": "remove_holding", "ticker": "ALB"})
+    status, page = post({"action": "remove_holding", "ticker": "ALB", "return": "/portfolio"})
+    assert status == 200
     assert 'data-ticker="ALB"' not in page
     assert 'data-ticker="TSLA"' in page
-    page = post({"action": "add_holding", "ticker": "F", "weight": "0.1"})
+    assert "Holding removed." in page
+    status, page = post({"action": "add_holding", "ticker": "F", "weight": "10", "return": "/portfolio", "form": "add-holding"})
     assert 'data-ticker="F"' in page
-    page = post({"action": "add_holding", "ticker": "F", "weight": "4"})
-    assert "Enter a weight from 0 to 1." in page
-    page = post({"action": "suggest_topics"})
+    assert env.swarm.store.weight("F") == 0.1
+    status, page = post({"action": "add_holding", "ticker": "F", "weight": "400", "return": "/portfolio", "form": "add-holding"})
+    assert status == 400
+    assert "Enter a weight from 0 to 100%." in page
+    assert 'aria-invalid="true"' in page
+    assert 'value="400"' in page
+    status, page = post({"action": "suggest_topics", "return": "/portfolio"})
     assert "EV supply chain" in page
     assert 'data-status="suggested"' in page
-    page = post(
+    status, page = post(
         {
             "action": "save_settings",
-            "alert_weight": "0.5",
+            "return": "/settings",
+            "form": "settings",
+            "alert_weight": "50",
             "you_search_usd": "0.5",
             "you_research_usd": "2",
             "monthly_budget_usd": "25",
@@ -638,8 +659,15 @@ def test_local_dashboard_saves_portfolio_and_opens_thesis(tmp_path: Path) -> Non
     )
     assert "Spend $" in page
     assert "of $25.00 this month." in page
+    assert env.swarm.view()["alert_weight"] == 0.5
     with urllib.request.urlopen(f"{base}/thesis/{thesis_id}") as response:
         one = response.read().decode()
     assert f'id="thesis-{thesis_id}"' in one
     assert "Chile lithium mine strike cuts supply" in one
+    try:
+        urllib.request.urlopen(f"{base}/thesis/nope")
+        missing_status = 200
+    except urllib.error.HTTPError as exc:
+        missing_status = exc.code
+    assert missing_status == 404
     httpd.shutdown()

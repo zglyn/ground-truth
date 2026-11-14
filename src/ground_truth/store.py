@@ -122,8 +122,42 @@ class Store:
               kind TEXT PRIMARY KEY,
               n INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS charges (
+              id TEXT PRIMARY KEY,
+              kind TEXT NOT NULL,
+              at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS dossier_versions (
+              event_id TEXT NOT NULL,
+              version INTEGER NOT NULL,
+              session_id TEXT NOT NULL,
+              body TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (event_id, version)
+            );
+            CREATE TABLE IF NOT EXISTS pipeline_status (
+              stage TEXT PRIMARY KEY,
+              state TEXT NOT NULL,
+              detail TEXT NOT NULL,
+              last_run_at TEXT NOT NULL,
+              last_ok_at TEXT
+            );
             """
         )
+        columns = {row["name"] for row in self._db.execute("PRAGMA table_info(events)")}
+        if "research_pending" not in columns:
+            self._db.execute("ALTER TABLE events ADD COLUMN research_pending INTEGER NOT NULL DEFAULT 0")
+        if "last_error" not in columns:
+            self._db.execute("ALTER TABLE events ADD COLUMN last_error TEXT")
+        migrated = self._db.execute("SELECT COUNT(*) AS n FROM dossier_versions").fetchone()["n"]
+        if not migrated:
+            self._db.execute(
+                """
+                INSERT INTO dossier_versions (event_id, version, session_id, body, created_at)
+                SELECT dossiers.event_id, 1, dossiers.session_id, dossiers.body, events.opened_at
+                FROM dossiers JOIN events ON events.id = dossiers.event_id
+                """
+            )
         self._db.commit()
 
     def close(self) -> None:
@@ -134,6 +168,15 @@ class Store:
         with self._lock:
             self._db.execute("DELETE FROM holdings")
             self._db.executemany("INSERT INTO holdings (ticker, weight) VALUES (?, ?)", rows)
+            self._db.commit()
+
+    def upsert_holding(self, ticker: str, weight: float) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO holdings (ticker, weight) VALUES (?, ?) "
+                "ON CONFLICT(ticker) DO UPDATE SET weight = excluded.weight",
+                (ticker, weight),
+            )
             self._db.commit()
 
     def remove_holding(self, ticker: str) -> None:
@@ -160,17 +203,26 @@ class Store:
             self._db.commit()
         return topic_id
 
-    def update_topic(self, topic_id: str, *, name: str | None, holdings: list[str] | None, status: str | None) -> None:
+    def update_topic(
+        self,
+        topic_id: str,
+        *,
+        name: str | None,
+        holdings: list[str] | None,
+        status: str | None,
+        feeds: list[str] | None = None,
+    ) -> None:
         with self._lock:
             row = self._db.execute("SELECT * FROM topics WHERE id = ?", (topic_id,)).fetchone()
             if row is None:
                 raise KeyError(topic_id)
             self._db.execute(
-                "UPDATE topics SET name = ?, holdings = ?, status = ? WHERE id = ?",
+                "UPDATE topics SET name = ?, holdings = ?, status = ?, feeds = ? WHERE id = ?",
                 (
                     name if name is not None else row["name"],
                     json.dumps(holdings) if holdings is not None else row["holdings"],
                     status if status is not None else row["status"],
+                    json.dumps(feeds) if feeds is not None else row["feeds"],
                     topic_id,
                 ),
             )
@@ -276,6 +328,19 @@ class Store:
             )
             self._db.commit()
 
+    def set_research_pending(self, event_id: str, pending: bool) -> None:
+        with self._lock:
+            self._db.execute(
+                "UPDATE events SET research_pending = ? WHERE id = ?",
+                (1 if pending else 0, event_id),
+            )
+            self._db.commit()
+
+    def set_event_error(self, event_id: str, error: str | None) -> None:
+        with self._lock:
+            self._db.execute("UPDATE events SET last_error = ? WHERE id = ?", (error, event_id))
+            self._db.commit()
+
     def close_event(self, event_id: str) -> None:
         with self._lock:
             self._db.execute("UPDATE events SET status = 'closed' WHERE id = ?", (event_id,))
@@ -325,22 +390,41 @@ class Store:
             row = self._db.execute("SELECT MAX(version) AS v FROM theses WHERE event_id = ?", (event_id,)).fetchone()
             return 1 if row["v"] is None else int(row["v"]) + 1
 
-    def save_dossier(self, event_id: str, session_id: str, body: dict[str, Any]) -> None:
+    def save_dossier(self, event_id: str, session_id: str, body: dict[str, Any], created_at: datetime) -> int:
         with self._lock:
+            row = self._db.execute(
+                "SELECT MAX(version) AS v FROM dossier_versions WHERE event_id = ?", (event_id,)
+            ).fetchone()
+            version = 1 if row["v"] is None else int(row["v"]) + 1
             self._db.execute(
-                """
-                INSERT INTO dossiers (event_id, session_id, body) VALUES (?, ?, ?)
-                ON CONFLICT(event_id) DO UPDATE SET session_id = excluded.session_id, body = excluded.body
-                """,
-                (event_id, session_id, json.dumps(body)),
+                "INSERT INTO dossier_versions (event_id, version, session_id, body, created_at) VALUES (?, ?, ?, ?, ?)",
+                (event_id, version, session_id, json.dumps(body), created_at.isoformat()),
             )
-            self._db.execute("UPDATE events SET dossier_session = ? WHERE id = ?", (session_id, event_id))
+            self._db.execute(
+                "UPDATE events SET dossier_session = ?, research_pending = 0 WHERE id = ?",
+                (session_id, event_id),
+            )
             self._db.commit()
+        return version
+
+    def dossier_versions(self, event_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM dossier_versions WHERE event_id = ? ORDER BY version", (event_id,)
+            ).fetchall()
+        return [
+            {
+                "version": int(row["version"]),
+                "session_id": row["session_id"],
+                "created_at": row["created_at"],
+                **json.loads(row["body"]),
+            }
+            for row in rows
+        ]
 
     def dossier(self, event_id: str) -> dict[str, Any] | None:
-        with self._lock:
-            row = self._db.execute("SELECT body FROM dossiers WHERE event_id = ?", (event_id,)).fetchone()
-            return None if row is None else json.loads(row["body"])
+        versions = self.dossier_versions(event_id)
+        return versions[-1] if versions else None
 
     def add_receipt(self, url: str, passage: str, retrieved_at: datetime) -> str:
         receipt_id = _id()
@@ -482,8 +566,12 @@ class Store:
             )
             self._db.commit()
 
-    def add_cost(self, kind: str) -> None:
+    def add_cost(self, kind: str, at: datetime) -> None:
         with self._lock:
+            self._db.execute(
+                "INSERT INTO charges (id, kind, at) VALUES (?, ?, ?)",
+                (_id(), kind, at.isoformat()),
+            )
             self._db.execute(
                 """
                 INSERT INTO costs (kind, n) VALUES (?, 1)
@@ -497,6 +585,58 @@ class Store:
         with self._lock:
             rows = self._db.execute("SELECT kind, n FROM costs").fetchall()
             return {row["kind"]: int(row["n"]) for row in rows}
+
+    def month_costs(self, month: str) -> dict[str, int]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT kind, COUNT(*) AS n FROM charges WHERE substr(at, 1, 7) = ? GROUP BY kind",
+                (month,),
+            ).fetchall()
+            return {row["kind"]: int(row["n"]) for row in rows}
+
+    def stage_report(self, stage: str, state: str, detail: str, at: datetime) -> None:
+        ok_at = at.isoformat() if state != "failed" else None
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO pipeline_status (stage, state, detail, last_run_at, last_ok_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(stage) DO UPDATE SET
+                  state = excluded.state,
+                  detail = excluded.detail,
+                  last_run_at = excluded.last_run_at,
+                  last_ok_at = COALESCE(excluded.last_ok_at, pipeline_status.last_ok_at)
+                """,
+                (stage, state, detail, at.isoformat(), ok_at),
+            )
+            self._db.commit()
+
+    def stages(self) -> dict[str, dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute("SELECT * FROM pipeline_status").fetchall()
+        return {
+            row["stage"]: {
+                "state": row["state"],
+                "detail": row["detail"],
+                "last_run_at": row["last_run_at"],
+                "last_ok_at": row["last_ok_at"],
+            }
+            for row in rows
+        }
+
+    def grade_rows(self) -> list[sqlite3.Row]:
+        with self._lock:
+            return list(
+                self._db.execute(
+                    """
+                    SELECT grades.*, impacts.ticker, impacts.stance, impacts.thesis_id, theses.event_id
+                    FROM grades
+                    JOIN impacts ON impacts.id = grades.impact_id
+                    JOIN theses ON theses.id = impacts.thesis_id
+                    ORDER BY theses.created_at DESC, impacts.ticker, grades.horizon
+                    """
+                )
+            )
 
     def setting(self, key: str, default: str) -> str:
         with self._lock:

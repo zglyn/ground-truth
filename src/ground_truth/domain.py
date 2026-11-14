@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -74,6 +75,26 @@ class Quote:
     volume: float
 
 
+def finite_unit(value: object, field: str) -> float:
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(field) from exc
+    if not math.isfinite(number) or number < 0 or number > 1:
+        raise ValueError(field)
+    return number
+
+
+def finite_money(value: object, field: str) -> float:
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(field) from exc
+    if not math.isfinite(number) or number < 0:
+        raise ValueError(field)
+    return number
+
+
 def tokens(text: str) -> set[str]:
     words = re.findall(r"[a-z0-9]+", text.lower())
     return {word for word in words if len(word) > 2 and word not in _STOP}
@@ -115,19 +136,76 @@ def classify_sighting(
     return ("new", related)
 
 
+def _easter(year: int) -> date:
+    a = year % 19
+    b, c = divmod(year, 100)
+    d, e = divmod(b, 4)
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = divmod(c, 4)
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month, day = divmod(h + l - 7 * m + 114, 31)
+    return date(year, month, day + 1)
+
+
+def _nth_weekday(year: int, month: int, weekday: int, n: int) -> date:
+    first = date(year, month, 1)
+    offset = (weekday - first.weekday()) % 7
+    return first + timedelta(days=offset + 7 * (n - 1))
+
+
+def _last_weekday(year: int, month: int, weekday: int) -> date:
+    following = date(year + (month // 12), month % 12 + 1, 1)
+    last = following - timedelta(days=1)
+    return last - timedelta(days=(last.weekday() - weekday) % 7)
+
+
+def _observed(day: date) -> date:
+    if day.weekday() == 5:
+        return day - timedelta(days=1)
+    if day.weekday() == 6:
+        return day + timedelta(days=1)
+    return day
+
+
+def market_holidays(year: int) -> frozenset[date]:
+    days = {
+        _nth_weekday(year, 1, 0, 3),
+        _nth_weekday(year, 2, 0, 3),
+        _easter(year) - timedelta(days=2),
+        _last_weekday(year, 5, 0),
+        _observed(date(year, 7, 4)),
+        _nth_weekday(year, 9, 0, 1),
+        _nth_weekday(year, 11, 3, 4),
+        _observed(date(year, 12, 25)),
+    }
+    new_year = date(year, 1, 1)
+    if new_year.weekday() != 5:
+        days.add(_observed(new_year))
+    if year >= 2022:
+        days.add(_observed(date(year, 6, 19)))
+    return frozenset(days)
+
+
+def is_trading_day(day: date) -> bool:
+    return day.weekday() < 5 and day not in market_holidays(day.year)
+
+
 def add_trading_days(day: date, count: int) -> date:
     cursor = day
     left = count
     while left:
         cursor += timedelta(days=1)
-        if cursor.weekday() < 5:
+        if is_trading_day(cursor):
             left -= 1
     return cursor
 
 
 def previous_trading_day(day: date) -> date:
     cursor = day - timedelta(days=1)
-    while cursor.weekday() >= 5:
+    while not is_trading_day(cursor):
         cursor -= timedelta(days=1)
     return cursor
 
@@ -150,6 +228,11 @@ def portfolio_net(impacts: list[tuple[Stance, float, Confidence]]) -> float:
     weight = {Confidence.HIGH: 1.0, Confidence.MEDIUM: 0.6, Confidence.LOW: 0.3}
     sign = {Stance.BULL: 1.0, Stance.BEAR: -1.0, Stance.NEUTRAL: 0.0}
     return sum(sign[stance] * holding_weight * weight[confidence] for stance, holding_weight, confidence in impacts)
+
+
+def portfolio_lean(net: float) -> str:
+    color = portfolio_color(net)
+    return {"bull": "Leans Bull", "bear": "Leans Bear", "neutral": "Roughly neutral"}[color]
 
 
 def portfolio_color(net: float) -> Literal["bull", "bear", "neutral"]:

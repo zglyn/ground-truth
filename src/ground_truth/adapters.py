@@ -5,7 +5,8 @@ import os
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
+from typing import Callable
 
 from ground_truth.domain import NewsItem, Quote
 
@@ -92,13 +93,65 @@ class LivePages:
 
 
 class LiveQuotes:
-    def quote(self, ticker: str, on: date) -> Quote:
-        url = f"https://stooq.com/q/l/?s={ticker.lower()}.us&f=sd2t2ohlcv&h&e=csv"
-        text = _get(url).decode()
-        lines = [line for line in text.splitlines() if line and not line.lower().startswith("symbol")]
-        if not lines:
-            return Quote(0.0, 0.0)
-        cells = lines[-1].split(",")
-        price = float(cells[6]) if len(cells) > 6 and cells[6] not in ("", "N/D") else 0.0
-        volume = float(cells[7]) if len(cells) > 7 and cells[7] not in ("", "N/D") else 0.0
-        return Quote(price, volume)
+    """Daily quotes from Stooq, keyed by the date asked for.
+
+    For today it uses the latest quote, and only if that quote is dated today.
+    For past dates it uses the daily history and returns that day's close.
+    When there is no price for the requested day it returns None rather than
+    reusing another day's price.
+    """
+
+    def __init__(
+        self,
+        get: Callable[[str], bytes] | None = None,
+        today: Callable[[], date] | None = None,
+    ) -> None:
+        self._get = get or (lambda url: _get(url))
+        self._today = today or (lambda: datetime.now(timezone.utc).date())
+
+    def quote(self, ticker: str, on: date) -> Quote | None:
+        symbol = urllib.parse.quote(f"{ticker.lower()}.us")
+        if on >= self._today():
+            return self._latest(symbol, on)
+        return self._historical(symbol, on)
+
+    def _latest(self, symbol: str, on: date) -> Quote | None:
+        text = self._get(f"https://stooq.com/q/l/?s={symbol}&f=sd2t2ohlcv&h&e=csv").decode()
+        for cells in _csv_rows(text):
+            if len(cells) < 8 or cells[1] != on.isoformat():
+                continue
+            price, volume = _number(cells[6]), _number(cells[7])
+            if price:
+                return Quote(price, volume or 0.0)
+        return None
+
+    def _historical(self, symbol: str, on: date) -> Quote | None:
+        start = on - timedelta(days=7)
+        url = f"https://stooq.com/q/d/l/?s={symbol}&d1={start:%Y%m%d}&d2={on:%Y%m%d}&i=d"
+        for cells in _csv_rows(self._get(url).decode()):
+            if len(cells) < 6 or cells[0] != on.isoformat():
+                continue
+            price, volume = _number(cells[4]), _number(cells[5])
+            if price:
+                return Quote(price, volume or 0.0)
+        return None
+
+
+def _csv_rows(text: str) -> list[list[str]]:
+    rows = []
+    for line in text.splitlines():
+        cells = [cell.strip() for cell in line.split(",")]
+        if not line.strip() or cells[0].lower() in ("symbol", "date"):
+            continue
+        rows.append(cells)
+    return rows
+
+
+def _number(raw: str) -> float | None:
+    if raw in ("", "N/D"):
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return value if value == value and value not in (float("inf"), float("-inf")) else None

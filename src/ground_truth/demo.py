@@ -91,7 +91,9 @@ def _canned(swarm: Swarm) -> None:
     swarm._accept_thesis(
         event_id,
         {"answers": {}, "missing": [], "receipts": []},
+        set(),
         None,
+        [],
         {
             "impacts": [
                 {

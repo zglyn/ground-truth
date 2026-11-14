@@ -4,14 +4,13 @@ import json
 import os
 import shutil
 import time
-from datetime import datetime, timezone
 
 from ground_truth.adapters import LiveNews, LivePages, LiveQuotes, LiveYou
 from ground_truth.domain import topics_for_holdings
 from ground_truth.dashboard import bind_address, serve
 from ground_truth.opencrawl import OpenCrawlBoard, OpenCrawlSessions, cli_run
 from ground_truth.recording_check import allows_start, recording_status
-from ground_truth.swarm import ManualClock, ScriptedHarness, Swarm
+from ground_truth.swarm import ScriptedHarness, Swarm, SystemClock
 
 
 class _Discord:
@@ -53,23 +52,26 @@ class _Recording:
         return {"ok": allows_start(status["status"]), "detail": status["detail"]}
 
 
-def main() -> None:
-    path = os.environ.get("SWARM_DB", "/tmp/ground-truth.sqlite")
-    swarm = Swarm(
-        path,
-        clock=ManualClock(datetime.now(timezone.utc).replace(tzinfo=None)),
+def build_swarm(path: str | None = None) -> Swarm:
+    return Swarm(
+        path or os.environ.get("SWARM_DB", "ground-truth.sqlite"),
+        clock=SystemClock(),
         news=LiveNews(),
         you=LiveYou(),
         pages=LivePages(),
         quotes=LiveQuotes(),
         board=OpenCrawlBoard(cli_run),
         sessions=OpenCrawlSessions(cli_run),
-        harness=ScriptedHarness(),
+        harness=ScriptedHarness(mode="custom-code"),
         discord=_Discord(),
         llm=_Llm(),
         recording=_Recording(),
         dashboard_url=os.environ.get("DASHBOARD_URL", "http://127.0.0.1:8080"),
     )
+
+
+def main() -> None:
+    swarm = build_swarm()
     host, port = bind_address()
     try:
         httpd = serve(swarm, host, port)
@@ -78,11 +80,16 @@ def main() -> None:
         raise SystemExit(1) from exc
     shown = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
     print(f"dashboard http://{shown}:{httpd.server_address[1]}/", flush=True)
+    print(f"mode {swarm.runtime['label']}", flush=True)
     try:
         status = swarm.start()
     except Exception as exc:
-        status = {"detail": f"recording check failed: {exc}"}
+        swarm.blocked = True
+        swarm.recording = {"ok": False, "detail": f"recording check could not run: {exc}"}
+        status = swarm.recording
     print(f"recording {status['detail']}", flush=True)
+    if swarm.blocked:
+        print("research paused: the recording check failed; the dashboard stays up", flush=True)
     while True:
         try:
             swarm.tick()

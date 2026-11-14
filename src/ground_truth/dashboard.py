@@ -1,26 +1,42 @@
 from __future__ import annotations
 
-import html
 import json
+import math
 import os
 import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Callable
+from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
+from ground_truth import render
+from ground_truth.render import SAVED, FormState
 from ground_truth.swarm import Swarm
+from ground_truth.views import Dashboard, build
 
 _TICKER = re.compile(r"[A-Z][A-Z0-9.\-]{0,7}")
-_ERRORS = {
-    "ticker": "Enter a ticker of up to 8 letters or digits.",
-    "weight": "Enter a weight from 0 to 1.",
+ERRORS = {
+    "ticker": "Enter a ticker of 1 to 8 letters, digits, dots or hyphens, starting with a letter.",
+    "weight": "Enter a weight from 0 to 100%.",
     "name": "Enter a Watch Topic name.",
-    "topic": "That Watch Topic is not on this dashboard.",
-    "money": "Enter a zero or positive dollar amount.",
-    "alert": "Enter an alert weight from 0 to 1.",
+    "holdings": "Choose at least one Holding.",
+    "topic": "That Watch Topic is no longer on this dashboard.",
+    "feeds": "Enter one feed address per line, each starting with http:// or https://.",
+    "alert_weight": "Enter an alert threshold from 0 to 100%.",
+    "you_search_usd": "Enter a dollar amount of zero or more, or leave it blank.",
+    "you_research_usd": "Enter a dollar amount of zero or more, or leave it blank.",
+    "monthly_budget_usd": "Enter a monthly budget of zero dollars or more.",
     "action": "That action is not available.",
 }
+PAGES = ("/", "/portfolio", "/track-record", "/settings")
+
+Fields = dict[str, list[str]]
+
+
+class Outcome:
+    def __init__(self, errors: dict[str, str] | None = None, saved: str = "") -> None:
+        self.errors = errors or {}
+        self.saved = saved
 
 
 def bind_address(environ: dict[str, str] | None = None) -> tuple[str, int]:
@@ -30,320 +46,231 @@ def bind_address(environ: dict[str, str] | None = None) -> tuple[str, int]:
     return host, port
 
 
-def _esc(value: object) -> str:
-    return html.escape(str(value), quote=True)
+def _one(fields: Fields, name: str) -> str:
+    values = fields.get(name)
+    return values[0].strip() if values else ""
 
 
-def _tickers(raw: str) -> list[str] | None:
-    symbols = []
-    for part in raw.split(","):
-        symbol = part.strip().upper()
-        if not symbol:
-            continue
-        if _TICKER.fullmatch(symbol) is None:
-            return None
-        if symbol not in symbols:
-            symbols.append(symbol)
+def _percent(raw: str) -> float | None:
+    try:
+        value = float(raw.replace("%", "").strip())
+    except ValueError:
+        return None
+    if not math.isfinite(value) or value < 0 or value > 100:
+        return None
+    return value / 100
+
+
+def _money(raw: str, *, blank: bool) -> str | None:
+    if raw == "":
+        return "" if blank else None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return raw
+
+
+def _holdings(fields: Fields) -> list[str] | None:
+    symbols: list[str] = []
+    for raw in fields.get("holdings", []):
+        for part in raw.split(","):
+            symbol = part.strip().upper()
+            if not symbol:
+                continue
+            if _TICKER.fullmatch(symbol) is None:
+                return None
+            if symbol not in symbols:
+                symbols.append(symbol)
     return symbols
 
 
-def _unit(raw: str) -> float | None:
-    try:
-        value = float(raw.strip())
-    except ValueError:
+def _feeds(raw: str) -> list[str] | None:
+    feeds = [line.strip() for line in re.split(r"[\r\n,]+", raw) if line.strip()]
+    if any(urlparse(feed).scheme not in ("http", "https") or not urlparse(feed).netloc for feed in feeds):
         return None
-    if value < 0 or value > 1:
-        return None
-    return value
+    return feeds
 
 
-def _money(raw: str) -> str | None:
-    text = raw.strip()
-    if text == "":
-        return ""
-    try:
-        value = float(text)
-    except ValueError:
-        return None
-    if value < 0:
-        return None
-    return text
+def _err(*names: str) -> Outcome:
+    return Outcome({name: ERRORS[name] for name in names})
 
 
-def _add_holding(swarm: Swarm, fields: dict[str, str]) -> str | None:
-    ticker = fields.get("ticker", "").strip().upper()
+def _add_holding(swarm: Swarm, fields: Fields) -> Outcome:
+    ticker = _one(fields, "ticker").upper()
+    weight = _percent(_one(fields, "weight"))
+    bad = []
     if _TICKER.fullmatch(ticker) is None:
-        return "ticker"
-    weight = _unit(fields.get("weight", ""))
+        bad.append("ticker")
     if weight is None:
-        return "weight"
+        bad.append("weight")
+    if bad:
+        return _err(*bad)
+    assert weight is not None
     swarm.save_holding(ticker, weight)
-    return None
+    return Outcome(saved="holding")
 
 
-def _remove_holding(swarm: Swarm, fields: dict[str, str]) -> str | None:
-    ticker = fields.get("ticker", "").strip().upper()
+def _remove_holding(swarm: Swarm, fields: Fields) -> Outcome:
+    ticker = _one(fields, "ticker").upper()
     if _TICKER.fullmatch(ticker) is None:
-        return "ticker"
+        return _err("ticker")
     swarm.remove_holding(ticker)
-    return None
+    return Outcome(saved="holding-removed")
 
 
-def _suggest_topics(swarm: Swarm, fields: dict[str, str]) -> str | None:
+def _suggest(swarm: Swarm, fields: Fields) -> Outcome:
     swarm.suggest_topics()
-    return None
+    return Outcome(saved="suggested")
 
 
-def _topic_edit(swarm: Swarm, fields: dict[str, str], *, accept: bool) -> str | None:
-    topic_id = fields.get("id", "").strip()
-    name = fields.get("name", "").strip()
-    holdings = _tickers(fields.get("holdings", ""))
-    if holdings is None:
-        return "ticker"
-    try:
-        if accept:
-            swarm.accept_topic(topic_id, name=name or None, holdings=holdings or None)
-        else:
-            swarm.reject_topic(topic_id)
-    except KeyError:
-        return "topic"
-    return None
-
-
-def _add_topic(swarm: Swarm, fields: dict[str, str]) -> str | None:
-    name = fields.get("name", "").strip()
-    if not name:
-        return "name"
-    holdings = _tickers(fields.get("holdings", ""))
+def _accept(swarm: Swarm, fields: Fields) -> Outcome:
+    holdings = _holdings(fields)
     if not holdings:
-        return "ticker"
-    feeds = [item.strip() for item in fields.get("feeds", "").split(",") if item.strip()]
+        return _err("holdings")
+    try:
+        swarm.accept_topic(_one(fields, "id"), name=_one(fields, "name") or None, holdings=holdings)
+    except KeyError:
+        return Outcome({"_form": ERRORS["topic"]})
+    return Outcome(saved="topic-accepted")
+
+
+def _reject(swarm: Swarm, fields: Fields) -> Outcome:
+    try:
+        swarm.reject_topic(_one(fields, "id"))
+    except KeyError:
+        return Outcome({"_form": ERRORS["topic"]})
+    return Outcome(saved="topic-rejected")
+
+
+def _update_topic(swarm: Swarm, fields: Fields) -> Outcome:
+    holdings = _holdings(fields)
+    feeds = _feeds(_one(fields, "feeds"))
+    bad = []
+    if not holdings:
+        bad.append("holdings")
+    if feeds is None:
+        bad.append("feeds")
+    if bad:
+        return _err(*bad)
+    assert holdings is not None and feeds is not None
+    try:
+        swarm.update_topic(_one(fields, "id"), holdings=holdings, feeds=feeds)
+    except KeyError:
+        return Outcome({"_form": ERRORS["topic"]})
+    return Outcome(saved="topic")
+
+
+def _add_topic(swarm: Swarm, fields: Fields) -> Outcome:
+    name = _one(fields, "name")
+    holdings = _holdings(fields)
+    feeds = _feeds(_one(fields, "feeds"))
+    bad = []
+    if not name:
+        bad.append("name")
+    if not holdings:
+        bad.append("holdings")
+    if feeds is None:
+        bad.append("feeds")
+    if bad:
+        return _err(*bad)
+    assert holdings is not None and feeds is not None
     swarm.add_topic(name, holdings, feeds)
-    return None
+    return Outcome(saved="topic")
 
 
-def _save_settings(swarm: Swarm, fields: dict[str, str]) -> str | None:
-    weight = _unit(fields.get("alert_weight", ""))
-    if weight is None:
-        return "alert"
-    search = _money(fields.get("you_search_usd", ""))
-    research = _money(fields.get("you_research_usd", ""))
-    budget = _money(fields.get("monthly_budget_usd", ""))
-    if search is None or research is None or budget is None:
-        return "money"
+def _save_settings(swarm: Swarm, fields: Fields) -> Outcome:
+    weight = _percent(_one(fields, "alert_weight"))
+    search = _money(_one(fields, "you_search_usd"), blank=True)
+    research = _money(_one(fields, "you_research_usd"), blank=True)
+    budget = _money(_one(fields, "monthly_budget_usd"), blank=False)
+    bad = [
+        name
+        for name, value in (
+            ("alert_weight", weight),
+            ("you_search_usd", search),
+            ("you_research_usd", research),
+            ("monthly_budget_usd", budget),
+        )
+        if value is None
+    ]
+    if bad:
+        return _err(*bad)
+    assert weight is not None and search is not None and research is not None and budget is not None
     swarm.set_alert_weight(weight)
-    swarm.save_rates(search, research, budget or "25")
-    return None
+    swarm.save_rates(search, research, budget)
+    return Outcome(saved="settings")
 
 
-_COMMANDS: dict[str, Callable[[Swarm, dict[str, str]], str | None]] = {
+def _run_now(swarm: Swarm, fields: Fields) -> Outcome:
+    return Outcome(saved="run" if swarm.run_now() else "running")
+
+
+COMMANDS: dict[str, Callable[[Swarm, Fields], Outcome]] = {
     "add_holding": _add_holding,
     "remove_holding": _remove_holding,
-    "suggest_topics": _suggest_topics,
-    "accept_topic": lambda swarm, fields: _topic_edit(swarm, fields, accept=True),
-    "reject_topic": lambda swarm, fields: _topic_edit(swarm, fields, accept=False),
+    "suggest_topics": _suggest,
+    "accept_topic": _accept,
+    "reject_topic": _reject,
+    "update_topic": _update_topic,
     "add_topic": _add_topic,
     "save_settings": _save_settings,
+    "run_now": _run_now,
 }
 
 
-def apply_command(swarm: Swarm, fields: dict[str, str]) -> str | None:
-    command = _COMMANDS.get(fields.get("action", ""))
+def apply_command(swarm: Swarm, fields: Fields) -> Outcome:
+    command = COMMANDS.get(_one(fields, "action"))
     if command is None:
-        return "action"
-    return command(swarm, fields)
+        return Outcome({"_form": ERRORS["action"]})
+    try:
+        return command(swarm, fields)
+    except ValueError as exc:
+        name = str(exc)
+        return Outcome({name: ERRORS.get(name, "That value is not valid.")})
 
 
-def _cost_line(costs: dict[str, Any]) -> str:
-    counts = f"You.com calls: search {costs['search']}, research {costs['research']}."
-    if not costs.get("priced"):
-        return counts + " Set the dollar rates below to price them."
-    return counts + f" Spend ${costs['spend_usd']:.2f} of ${costs['budget_usd']:.2f} this month."
+def render_page(
+    dash: Dashboard,
+    path: str,
+    query: dict[str, list[str]],
+    state: FormState | None = None,
+) -> tuple[int, str]:
+    notice = SAVED.get((query.get("saved") or [""])[0], "")
+    if path == "/":
+        holding = (query.get("holding") or [""])[0]
+        stance = (query.get("stance") or [""])[0]
+        if stance not in ("", "Bull", "Bear", "Neutral"):
+            stance = ""
+        return 200, render.overview(dash, holding=holding, stance=stance, notice=notice)
+    if path == "/portfolio":
+        return 200, render.portfolio(dash, state, notice=notice)
+    if path == "/track-record":
+        return 200, render.track_record(dash, notice=notice)
+    if path == "/settings":
+        return 200, render.settings(dash, state, notice=notice)
+    if path.startswith("/thesis/"):
+        thesis_id = path.removeprefix("/thesis/").strip("/")
+        body = render.thesis_detail(dash, thesis_id, notice=notice)
+        if body is not None:
+            return 200, body
+        return 404, render.not_found(dash, "That Thesis is not on this dashboard.")
+    return 404, render.not_found(dash, "There is no page at this address.")
 
 
-def render_html(view: dict[str, Any], focus: str | None = None, error: str | None = None) -> str:
-    titles = {event["id"]: event["title"] for event in view["events"]}
-    theses = list(view["theses"])
+def render_html(view: dict, focus: str | None = None) -> str:
+    """Render one page from a raw Swarm view: the Overview, or a Thesis when focus is given."""
+    dash = build(view)
     if focus:
-        theses.sort(key=lambda thesis: thesis["id"] != focus)
-    cards = []
-    for thesis in theses:
-        impacts = []
-        for impact in thesis["impacts"]:
-            move = "unknown" if impact["day_move"] is None else f"{impact['day_move']:+.2%}"
-            impacts.append(
-                "<li>"
-                f"<strong>{_esc(impact['ticker'])}</strong> {_esc(impact['stance'])} {_esc(impact['action'])}. "
-                f"{_esc(impact['expected'])} Direction {_esc(impact['direction'])}. "
-                f"Day move {_esc(move)}, volume {_esc(impact['volume'])}. Confidence {_esc(impact['confidence'])}."
-                "</li>"
-            )
-        claims = []
-        for claim in thesis["claims"]:
-            if claim["kind"] == "evidence" and claim["url"]:
-                claims.append(
-                    f'<li>Receipt <a href="{_esc(claim["url"])}">{_esc(claim["url"])}</a> '
-                    f'"{_esc(claim["passage"])}" retrieved {_esc(claim["retrieved_at"])}</li>'
-                )
-            else:
-                claims.append(f"<li>Inference: {_esc(claim['text'])}</li>")
-        changes = ""
-        if thesis["changes"]:
-            items = "".join(f"<li>{_esc(change)}</li>" for change in thesis["changes"])
-            changes = f"<p>Changed since the previous Thesis</p><ul>{items}</ul>"
-        missing = ""
-        if thesis["missing"]:
-            missing = "<p>Missing: " + _esc(", ".join(thesis["missing"])) + "</p>"
-        headline = titles.get(thesis["event_id"], thesis["event_id"])
-        cards.append(
-            f'<article id="thesis-{_esc(thesis["id"])}" data-effect="{_esc(thesis["color"])}" data-thesis="{_esc(thesis["id"])}">'
-            f"<h2>{_esc(headline)}</h2>"
-            f"<p>Version {_esc(thesis['version'])}. Net {thesis['net']:.3f}.</p>"
-            f"{changes}{missing}"
-            "<details><summary>Holding Impacts</summary>"
-            f"<ul>{''.join(impacts)}</ul>"
-            f"<ul>{''.join(claims)}</ul>"
-            f"<p>{_esc(thesis['disclaimer'])}</p>"
-            "</details></article>"
-        )
-    holdings = []
-    for holding in view["holdings"]:
-        ticker = _esc(holding["ticker"])
-        holdings.append(
-            "<li>"
-            f'<span data-ticker="{ticker}">{ticker} {holding["weight"]:.2f}</span> '
-            '<form method="post" action="/">'
-            '<input type="hidden" name="action" value="remove_holding">'
-            f'<input type="hidden" name="ticker" value="{ticker}">'
-            "<button>Remove</button></form></li>"
-        )
-    topics = []
-    for topic in view["topics"]:
-        joined = _esc(", ".join(topic["holdings"]))
-        feeds = _esc(", ".join(topic["feeds"]) or "none")
-        name = _esc(topic["name"])
-        topic_id = _esc(topic["id"])
-        controls = ""
-        if topic["status"] == "suggested":
-            controls = (
-                '<form method="post" action="/">'
-                '<input type="hidden" name="action" value="accept_topic">'
-                f'<input type="hidden" name="id" value="{topic_id}">'
-                f'<input name="name" value="{name}">'
-                f'<input name="holdings" value="{joined}">'
-                "<button>Accept</button></form>"
-                '<form method="post" action="/">'
-                '<input type="hidden" name="action" value="reject_topic">'
-                f'<input type="hidden" name="id" value="{topic_id}">'
-                "<button>Reject</button></form>"
-            )
-        topics.append(
-            f'<li data-topic="{topic_id}" data-status="{_esc(topic["status"])}">'
-            f"{name}. Holdings {joined}. Feeds {feeds}. {_esc(topic['status'])}. {controls}</li>"
-        )
-    events = []
-    for event in view["events"]:
-        events.append(
-            "<li>"
-            f"{_esc(event['title'])}. {_esc(event['status'])}. {_esc(event['corroboration'])}."
-            "</li>"
-        )
-    grades = []
-    for grade in view["track_record"]["grades"]:
-        mark = "correct" if grade["correct"] else "incorrect"
-        grades.append(f"<li>{_esc(grade['horizon'])} trading days, move {_esc(grade['move'])}, {mark}.</li>")
-    dismissed = "".join(
-        f"<li>{_esc(item['title'])}: {_esc(item['reason'])}</li>" for item in view["dismissed"]
-    )
-    record = view["track_record"]
-    recording = view.get("recording") or {}
-    detail = recording.get("detail", "") if isinstance(recording, dict) else ""
-    notice = ""
-    if error in _ERRORS:
-        notice = f'<p id="error">{_esc(_ERRORS[error])}</p>'
-    missing_focus = ""
-    if focus and all(thesis["id"] != focus for thesis in view["theses"]):
-        missing_focus = "<p>That Thesis is not on this dashboard.</p>"
-    costs = view["costs"]
-    alert = _esc(view["alert_weight"])
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Market Impact Swarm</title>
-<style>
-  body {{ font-family: Georgia, serif; margin: 2rem; color: #1c1915; background: #f6f3ee; }}
-  article[data-effect="bull"] {{ border-left: 8px solid #1b7f4a; }}
-  article[data-effect="bear"] {{ border-left: 8px solid #9c2f2f; }}
-  article[data-effect="neutral"] {{ border-left: 8px solid #8a8175; }}
-  article {{ background: white; padding: 1rem 1.25rem; margin: 0 0 1rem; }}
-  section > form {{ display: block; margin: 0.75rem 0; }}
-  li form {{ display: inline; margin-right: 0.5rem; }}
-  label {{ display: inline-block; margin: 0.25rem 0.75rem 0.25rem 0; }}
-  section {{ margin: 2rem 0; }}
-  #error {{ background: #9c2f2f; color: white; padding: 0.5rem 0.75rem; }}
-</style>
-</head>
-<body>
-<header>
-  <h1>Market Impact Swarm</h1>
-  <p>This dashboard is on this computer.</p>
-  <p>Track Record {record['correct']} correct of {record['total']}.</p>
-  <ul id="grades">{''.join(grades)}</ul>
-  <p>{_esc(_cost_line(costs))}</p>
-  <p>Recording {_esc(detail)}</p>
-</header>
-{notice}{missing_focus}
-<section id="theses">{''.join(cards) or '<p>No Thesis yet.</p>'}</section>
-<section id="portfolio">
-  <h2>Holdings</h2>
-  <ul id="holdings">{''.join(holdings)}</ul>
-  <form method="post" action="/">
-    <input type="hidden" name="action" value="add_holding">
-    <label>Ticker <input name="ticker" required></label>
-    <label>Weight <input name="weight" value="0.25" required></label>
-    <button>Save Holding</button>
-  </form>
-</section>
-<section id="topics">
-  <h2>Watch Topics</h2>
-  <ul>{''.join(topics)}</ul>
-  <form method="post" action="/">
-    <input type="hidden" name="action" value="suggest_topics">
-    <button>Suggest from Holdings</button>
-  </form>
-  <form method="post" action="/">
-    <input type="hidden" name="action" value="add_topic">
-    <label>Name <input name="name" required></label>
-    <label>Holdings <input name="holdings" placeholder="TSLA, ALB" required></label>
-    <label>Feeds <input name="feeds" placeholder="https://example.test/feed.xml"></label>
-    <button>Add Watch Topic</button>
-  </form>
-</section>
-<section id="events">
-  <h2>Events</h2>
-  <ul>{''.join(events)}</ul>
-</section>
-<section id="dismissed"><h2>Dismissed Sightings</h2><ul>{dismissed}</ul></section>
-<section id="settings">
-  <h2>Settings</h2>
-  <form method="post" action="/">
-    <input type="hidden" name="action" value="save_settings">
-    <label>Alert weight <input name="alert_weight" value="{alert}"></label>
-    <label>Search dollars <input name="you_search_usd" value="{_esc(costs.get('search_usd', ''))}"></label>
-    <label>Research dollars <input name="you_research_usd" value="{_esc(costs.get('research_usd', ''))}"></label>
-    <label>Monthly budget <input name="monthly_budget_usd" value="{_esc(costs.get('budget_usd', ''))}"></label>
-    <button>Save settings</button>
-  </form>
-</section>
-</body>
-</html>
-"""
+        body = render.thesis_detail(dash, focus)
+        return body if body is not None else render.not_found(dash, "That Thesis is not on this dashboard.")
+    return render.overview(dash)
 
 
-def _fields(raw: bytes) -> dict[str, str]:
-    parsed = parse_qs(raw.decode("utf-8", errors="replace"), keep_blank_values=True)
-    return {key: values[0] if values else "" for key, values in parsed.items()}
+def _fields(raw: bytes) -> Fields:
+    return parse_qs(raw.decode("utf-8", errors="replace"), keep_blank_values=True)
 
 
 def serve(swarm: Swarm, host: str = "127.0.0.1", port: int = 0) -> ThreadingHTTPServer:
@@ -353,25 +280,30 @@ def serve(swarm: Swarm, host: str = "127.0.0.1", port: int = 0) -> ThreadingHTTP
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
             if parsed.path == "/api/view":
-                body = json.dumps(dashboard.view()).encode()
-                self._send(200, body, "application/json")
+                self._send(200, json.dumps(dashboard.view()).encode(), "application/json")
                 return
-            focus = None
-            if parsed.path.startswith("/thesis/"):
-                focus = parsed.path.removeprefix("/thesis/").strip("/")
-            error = parse_qs(parsed.query).get("error", [""])[0]
-            body = render_html(dashboard.view(), focus or None, error or None).encode()
-            self._send(200, body, "text/html; charset=utf-8")
+            status, body = render_page(build(dashboard.view()), parsed.path, parse_qs(parsed.query))
+            self._send(status, body.encode(), "text/html; charset=utf-8")
 
         def do_POST(self) -> None:
             length = int(self.headers.get("Content-Length", "0") or "0")
             if length > 20_000:
                 self._send(413, b"too large", "text/plain")
                 return
-            error = apply_command(dashboard, _fields(self.rfile.read(length)))
-            location = "/" if not error else "/?error=" + error
+            fields = _fields(self.rfile.read(length))
+            back = _one(fields, "return")
+            if back not in PAGES:
+                back = "/"
+            outcome = apply_command(dashboard, fields)
+            if outcome.errors:
+                state = FormState(form=_one(fields, "form"), values=fields, errors=outcome.errors)
+                if "_form" in outcome.errors and len(outcome.errors) == 1 and back == "/":
+                    back = "/portfolio"
+                _, body = render_page(build(dashboard.view()), back, {}, state)
+                self._send(400, body.encode(), "text/html; charset=utf-8")
+                return
             self.send_response(303)
-            self.send_header("Location", location)
+            self.send_header("Location", f"{back}?saved={outcome.saved}")
             self.send_header("Content-Length", "0")
             self.end_headers()
 
@@ -379,6 +311,7 @@ def serve(swarm: Swarm, host: str = "127.0.0.1", port: int = 0) -> ThreadingHTTP
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
 
@@ -387,6 +320,7 @@ def serve(swarm: Swarm, host: str = "127.0.0.1", port: int = 0) -> ThreadingHTTP
 
     class _Server(ThreadingHTTPServer):
         allow_reuse_address = True
+        daemon_threads = True
 
     httpd = _Server((host, port), Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
