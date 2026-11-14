@@ -1,0 +1,15 @@
+services:
+  swarm:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      SWARM_DB: /data/swarm.sqlite
+      DASHBOARD_URL: http://127.0.0.1:8080
+      YDC_API_KEY: ${YDC_API_KEY:-}
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+    volumes:
+      - swarm-data:/data
+
+volumes:
+  swarm-data:

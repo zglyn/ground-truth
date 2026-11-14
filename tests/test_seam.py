@@ -1,0 +1,489 @@
+from __future__ import annotations
+
+import json
+import threading
+import urllib.request
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from ground_truth.dashboard import render_html, serve
+from ground_truth.domain import QUESTIONS, NewsItem
+from ground_truth.recording_check import recording_status
+from ground_truth.swarm import ManualClock, ScriptedHarness, Swarm
+from tests.fakes import (
+    FakeBoard,
+    FakeDiscord,
+    FakeLlm,
+    FakeNews,
+    FakePages,
+    FakeQuotes,
+    FakeRecording,
+    FakeSessions,
+    FakeYou,
+)
+
+START = datetime(2026, 1, 7, 15, 0, 0)
+PASSAGE = "The mine halted output overnight."
+
+
+def answered() -> dict[str, str]:
+    return {question: "answered" for question in QUESTIONS}
+
+
+class World:
+    def __init__(self, path: Path):
+        self.clock = ManualClock(START)
+        self.news = FakeNews()
+        self.you = FakeYou()
+        self.pages = FakePages(f"Report. {PASSAGE} More soon.")
+        self.quotes = FakeQuotes()
+        self.board = FakeBoard()
+        self.sessions = FakeSessions()
+        self.harness = ScriptedHarness()
+        self.discord = FakeDiscord()
+        self.llm = FakeLlm()
+        self.recording = FakeRecording()
+        self.swarm = Swarm(
+            str(path),
+            clock=self.clock,
+            news=self.news,
+            you=self.you,
+            pages=self.pages,
+            quotes=self.quotes,
+            board=self.board,
+            sessions=self.sessions,
+            harness=self.harness,
+            discord=self.discord,
+            llm=self.llm,
+            recording=self.recording,
+        )
+
+
+def world(tmp_path: Path) -> World:
+    return World(tmp_path / "swarm.sqlite")
+
+
+def portfolio(env: World) -> None:
+    env.swarm.set_holdings([("TSLA", 0.4), ("ALB", 0.2)])
+    env.swarm.add_topic("lithium", ["TSLA", "ALB"])
+
+
+def story(title: str, url: str | None = None) -> NewsItem:
+    return NewsItem(title=title, url=url or f"https://example.test/{title.replace(' ', '-')}", source="google-news", topic="lithium")
+
+
+def test_portfolio_topics_and_links(tmp_path: Path) -> None:
+    env = world(tmp_path)
+    env.swarm.set_holdings([("TSLA", 0.5), ("ALB", 0.2)])
+    env.swarm.remove_holding("ALB")
+    env.llm.suggestions = [{"name": "EV supply chain", "holdings": ["TSLA"]}]
+    suggested = env.swarm.suggest_topics()
+    env.swarm.accept_topic(suggested[0]["id"], name="EV supply", holdings=["TSLA"])
+    rejected = env.swarm.suggest_topics()
+    env.swarm.reject_topic(rejected[0]["id"])
+    env.swarm.add_topic("lithium", ["TSLA"], feeds=["https://example.test/lithium.xml"])
+    view = env.swarm.view()
+    assert [row["ticker"] for row in view["holdings"]] == ["TSLA"]
+    active = [topic for topic in view["topics"] if topic["status"] == "active"]
+    names = {topic["name"]: topic["holdings"] for topic in active}
+    assert names["EV supply"] == ("TSLA",)
+    assert names["lithium"] == ("TSLA",)
+    assert any(topic["status"] == "rejected" for topic in view["topics"])
+
+
+def test_scout_posts_each_source_once(tmp_path: Path) -> None:
+    env = world(tmp_path)
+    portfolio(env)
+    item = story("Chile lithium mine strike cuts supply")
+    env.news.google = [item]
+    env.news.feeds["https://example.test/extra.xml"] = [story("Lithium warehouse fire reported", "https://example.test/warehouse")]
+    env.swarm.add_topic("lithium", ["TSLA", "ALB"], feeds=["https://example.test/extra.xml"])
+    filing = story("ALB files an 8-K", "https://example.test/8k")
+    env.news.filings = [("ALB", filing)]
+    env.swarm.tick()
+    env.swarm.tick()
+    urls = {row["url"] for row in env.swarm.view()["sightings"]}
+    assert urls == {item.url, "https://example.test/warehouse", filing.url}
+    assert any(row["source"] == "sec-edgar" for row in env.swarm.view()["sightings"])
+    assert ("rss", "https://example.test/extra.xml") in env.news.calls
+    assert env.swarm.view()["scout_interval_seconds"] == 300
+
+
+def test_groups_sightings_and_dismisses_irrelevant(tmp_path: Path) -> None:
+    env = world(tmp_path)
+    portfolio(env)
+    env.swarm.inject_news(story("Chile lithium mine strike cuts supply"))
+    env.swarm.tick()
+    env.swarm.inject_news(story("Chile lithium mine strike spreads further", "https://example.test/second"))
+    env.swarm.inject_news(story("Lakers win finals", "https://example.test/lakers"))
+    env.swarm.tick()
+    view = env.swarm.view()
+    assert len(view["events"]) == 1
+    assert len([row for row in view["sightings"] if row["outcome"] == "attached"]) == 2
+    assert view["dismissed"][0]["reason"] == "unrelated to Watch Topic lithium"
+    assert len([run for run in env.harness.runs if run[0] == "researcher"]) == 1
+
+
+def test_ambiguous_match_uses_the_model(tmp_path: Path) -> None:
+    env = world(tmp_path)
+    portfolio(env)
+    env.swarm.inject_news(story("alpha lithium red west"))
+    env.swarm.tick()
+    env.swarm.inject_news(story("bravo lithium blue east", "https://example.test/bravo"))
+    env.swarm.tick()
+    first = env.swarm.view()["events"][0]["id"]
+    env.llm.answer = f"attach:{first}"
+    env.swarm.inject_news(story("alpha bravo lithium red blue", "https://example.test/mix"))
+    env.swarm.tick()
+    attached = [row for row in env.swarm.view()["sightings"] if row["title"] == "alpha bravo lithium red blue"]
+    assert attached[0]["event_id"] == first
+    assert len(env.swarm.view()["events"]) == 2
+
+
+def test_duplicate_board_delivery_is_one_event(tmp_path: Path) -> None:
+    env = world(tmp_path)
+    portfolio(env)
+    env.swarm.inject_news(story("Chile lithium mine strike cuts supply"))
+    env.swarm.tick()
+    env.swarm.tick()
+    assert len(env.swarm.view()["events"]) == 1
+    assert len(env.swarm.view()["sightings"]) == 1
+
+
+def test_unconfirmed_event_is_not_researched(tmp_path: Path) -> None:
+    env = world(tmp_path)
+    portfolio(env)
+    env.you.search_hits = []
+    env.swarm.inject_news(story("Chile lithium mine strike cuts supply"))
+    env.swarm.tick()
+    view = env.swarm.view()
+    assert view["events"][0]["corroboration"] == "unconfirmed"
+    assert view["theses"] == []
+    assert env.swarm.view()["costs"]["search"] == 1
+    assert env.swarm.view()["costs"]["research"] == 0
+
+
+def test_you_com_outage_skips_research(tmp_path: Path) -> None:
+    env = world(tmp_path)
+    portfolio(env)
+    env.you.fail = True
+    env.swarm.inject_news(story("Chile lithium mine strike cuts supply"))
+    env.swarm.tick()
+    assert env.swarm.view()["events"][0]["corroboration"] == "unavailable"
+    assert env.swarm.view()["theses"] == []
+
+
+def test_closure_and_related_event(tmp_path: Path) -> None:
+    env = world(tmp_path)
+    portfolio(env)
+    env.swarm.inject_news(story("Chile lithium mine strike cuts supply"))
+    env.swarm.tick()
+    original = env.swarm.view()["events"][0]["id"]
+    env.clock.advance(hours=73)
+    env.swarm.tick()
+    assert env.swarm.view()["events"][0]["status"] == "closed"
+    env.swarm.inject_news(story("Chile lithium mine strike spreads further", "https://example.test/later"))
+    env.swarm.tick()
+    events = env.swarm.view()["events"]
+    assert events[0]["status"] == "closed"
+    assert events[1]["related_event_id"] == original
+    assert events[1]["status"] == "open"
+
+
+def test_restart_ignores_repeated_board_messages(tmp_path: Path) -> None:
+    env = world(tmp_path)
+    portfolio(env)
+    env.swarm.inject_news(story("Chile lithium mine strike cuts supply"))
+    env.swarm.tick()
+    env.swarm.store.close()
+    again = Swarm(
+        str(tmp_path / "swarm.sqlite"),
+        clock=env.clock,
+        news=env.news,
+        you=env.you,
+        pages=env.pages,
+        quotes=env.quotes,
+        board=FakeBoard(),
+        sessions=env.sessions,
+        harness=env.harness,
+        discord=env.discord,
+        llm=env.llm,
+        recording=env.recording,
+    )
+    again.tick()
+    assert len(again.view()["events"]) == 1
+    assert len(again.view()["sightings"]) == 1
+
+
+def test_parallel_research_on_two_events(tmp_path: Path) -> None:
+    env = world(tmp_path)
+    portfolio(env)
+    barrier = threading.Barrier(2, timeout=5)
+
+    def researcher(event_id: str, prompt: str, tools: Any) -> dict:
+        barrier.wait()
+        return {"answers": answered(), "missing": []}
+
+    env.harness.on("researcher", researcher)
+    env.swarm.inject_news(story("lithium refinery fire in nevada"))
+    env.swarm.inject_news(story("lithium shipping lane closes", "https://example.test/lane"))
+    env.swarm.tick()
+    assert env.harness.max_in_flight >= 2
+    assert len(env.swarm.view()["events"]) == 2
+    assert len(env.swarm.view()["theses"]) == 2
+
+
+def test_research_budget_query_log_and_receipts(tmp_path: Path) -> None:
+    env = world(tmp_path)
+    portfolio(env)
+
+    def over_budget(event_id: str, prompt: str, tools: Any) -> dict:
+        errors = []
+        for index in range(5):
+            result = tools.research("lite", f"question {index}")
+            if result.get("error"):
+                errors.append(result["error"])
+        return {"answers": answered(), "missing": errors}
+
+    env.harness.on("researcher", over_budget)
+    env.swarm.inject_news(story("Chile lithium mine strike cuts supply"))
+    env.swarm.tick()
+    assert env.swarm.view()["costs"]["research"] == 4
+    assert "budget" in env.swarm.view()["theses"][0]["missing"]
+
+    def standard_first(event_id: str, prompt: str, tools: Any) -> dict:
+        blocked = tools.research("standard", "deep dive")
+        assert blocked["error"] == "lite required first"
+        tools.research("lite", "lite first")
+        tools.research("standard", "deep dive")
+        return {"answers": answered(), "missing": []}
+
+    env.harness.on("researcher", standard_first)
+    env.swarm.inject_news(story("lithium xylophone quota announced", "https://example.test/graphite"))
+    env.swarm.tick()
+    research_calls = [call for call in env.you.calls if call[0] == "research"]
+    assert ("research", "standard", "deep dive") in research_calls
+    assert sum(1 for call in research_calls if call[1] == "standard" and call[2] == "deep dive") == 1
+
+    def shared(event_id: str, prompt: str, tools: Any) -> dict:
+        tools.research("lite", "shared-query")
+        return {"answers": answered(), "missing": []}
+
+    paid_before = env.swarm.view()["costs"]["research"]
+    env.harness.on("researcher", shared)
+    env.swarm.inject_news(story("lithium quokka habitat listed", "https://example.test/nickel"))
+    env.swarm.tick()
+    env.swarm.inject_news(story("lithium narwhal census published", "https://example.test/cobalt"))
+    env.swarm.tick()
+    assert env.swarm.view()["costs"]["research"] == paid_before + 1
+
+    def receipts(event_id: str, prompt: str, tools: Any) -> dict:
+        tools.check_receipt("https://example.test/page", "invented sentence")
+        good = tools.check_receipt("https://example.test/page", PASSAGE)
+        return {"answers": answered(), "missing": [], "good": good["receipt_id"]}
+
+    def analyst(event_id: str, prompt: str, tools: Any) -> dict:
+        info = json.loads(prompt)
+        body = json.loads(tools.fetch_session(info["session"]))
+        return {
+            "impacts": [
+                {"ticker": "TSLA", "stance": "Bear", "action": "Trim", "expected": "costs up", "direction": "down", "confidence": "high"},
+                {"ticker": "ALB", "stance": "Bull", "action": "Add", "expected": "price up", "direction": "up", "confidence": "high"},
+            ],
+            "claims": [
+                {"text": PASSAGE, "receipt_id": body["receipts"][0]},
+                {"text": "The strike lasts all quarter.", "receipt_id": None},
+                {"text": "Dropped.", "receipt_id": "missing-receipt"},
+            ],
+            "missing": ["China inventory is unknown"],
+        }
+
+    env.harness.on("researcher", receipts)
+    env.harness.on("analyst", analyst)
+    env.swarm.inject_news(story("lithium ibex migration noted", "https://example.test/spodumene"))
+    env.swarm.tick()
+    thesis = env.swarm.view()["theses"][-1]
+    evidence = [claim for claim in thesis["claims"] if claim["kind"] == "evidence"]
+    inferences = [claim for claim in thesis["claims"] if claim["kind"] == "inference"]
+    assert len(evidence) == 1
+    assert evidence[0]["passage"] == PASSAGE
+    assert {claim["text"] for claim in inferences} == {"The strike lasts all quarter.", "Dropped."}
+    assert "China inventory is unknown" in thesis["missing"]
+    assert {impact["confidence"] for impact in thesis["impacts"]} == {"medium"}
+    assert {impact["stance"] for impact in thesis["impacts"]} == {"Bear", "Bull"}
+    assert thesis["disclaimer"] == "Not financial advice."
+    assert env.swarm.view()["orders"] == []
+
+
+def test_revision_links_the_previous_thesis(tmp_path: Path) -> None:
+    env = world(tmp_path)
+    portfolio(env)
+
+    def researcher(event_id: str, prompt: str, tools: Any) -> dict:
+        return {"answers": answered(), "missing": []}
+
+    env.harness.on("researcher", researcher)
+    env.swarm.inject_news(story("Chile lithium mine strike cuts supply"))
+    env.swarm.tick()
+    first = env.swarm.view()["theses"][0]
+    env.swarm.inject_news(story("Chile lithium mine strike spreads further", "https://example.test/more"))
+    env.swarm.tick()
+    theses = env.swarm.view()["theses"]
+    assert len(theses) == 2
+    assert theses[1]["version"] == 2
+    assert theses[1]["previous_id"] == first["id"]
+    assert theses[1]["changes"] == ["New Sighting attached"]
+
+
+def test_discord_threshold(tmp_path: Path) -> None:
+    env = world(tmp_path)
+    env.swarm.set_holdings([("TSLA", 0.5), ("ALB", 0.05)])
+    env.swarm.add_topic("lithium", ["TSLA", "ALB"])
+    env.swarm.set_alert_weight(0.3)
+
+    def researcher(event_id: str, prompt: str, tools: Any) -> dict:
+        return {"answers": answered(), "missing": []}
+
+    def analyst(event_id: str, prompt: str, tools: Any) -> dict:
+        return {
+            "impacts": [
+                {"ticker": "TSLA", "stance": "Bear", "action": "Trim", "expected": "costs up", "direction": "down", "confidence": "high"},
+                {"ticker": "ALB", "stance": "Bull", "action": "Add", "expected": "price up", "direction": "up", "confidence": "high"},
+            ],
+            "claims": [],
+            "missing": [],
+        }
+
+    env.harness.on("researcher", researcher)
+    env.harness.on("analyst", analyst)
+    env.swarm.inject_news(story("Chile lithium mine strike cuts supply"))
+    env.swarm.tick()
+    assert len(env.discord.sent) == 1
+    assert "TSLA" in env.discord.sent[0]["text"]
+    assert "Not financial advice." in env.discord.sent[0]["text"]
+    assert env.discord.sent[0]["url"].startswith("http://127.0.0.1:8080/thesis/")
+
+    env.harness.on(
+        "analyst",
+        lambda event_id, prompt, tools: {
+            "impacts": [
+                {"ticker": "TSLA", "stance": "Neutral", "action": "Hold", "expected": "unclear", "direction": "flat", "confidence": "high"}
+            ],
+            "claims": [],
+            "missing": [],
+        },
+    )
+    env.swarm.inject_news(story("lithium contract remains uncertain", "https://example.test/rare"))
+    env.swarm.tick()
+    assert len(env.discord.sent) == 1
+
+
+def test_track_record_catches_up_after_sleep(tmp_path: Path) -> None:
+    env = world(tmp_path)
+    portfolio(env)
+
+    def researcher(event_id: str, prompt: str, tools: Any) -> dict:
+        return {"answers": answered(), "missing": []}
+
+    def analyst(event_id: str, prompt: str, tools: Any) -> dict:
+        return {
+            "impacts": [
+                {"ticker": "TSLA", "stance": "Bull", "action": "Add", "expected": "demand", "direction": "up", "confidence": "medium"},
+                {"ticker": "ALB", "stance": "Bear", "action": "Trim", "expected": "oversupply", "direction": "down", "confidence": "medium"},
+            ],
+            "claims": [],
+            "missing": [],
+        }
+
+    env.harness.on("researcher", researcher)
+    env.harness.on("analyst", analyst)
+    env.quotes.prices[("TSLA", env.clock.now().date())] = (100.0, 10.0)
+    env.swarm.inject_news(story("Chile lithium mine strike cuts supply"))
+    env.swarm.tick()
+    from datetime import timedelta
+
+    day = env.clock.now().date()
+    for offset in range(1, 40):
+        current = day + timedelta(days=offset)
+        env.quotes.prices[("TSLA", current)] = (110.0, 12.0)
+        env.quotes.prices[("ALB", current)] = (120.0, 8.0)
+    env.clock.advance(trading_days=20)
+    env.swarm.grade()
+    grades = env.swarm.view()["track_record"]["grades"]
+    assert sorted(grade["horizon"] for grade in grades) == [1, 1, 5, 5, 20, 20]
+    tsla = [grade for grade in grades if grade["horizon"] == 1]
+    assert any(grade["correct"] for grade in tsla)
+    assert any(not grade["correct"] for grade in tsla)
+
+
+def test_dashboard_shows_thesis_and_dismissal(tmp_path: Path) -> None:
+    env = world(tmp_path)
+    portfolio(env)
+    env.swarm.inject_news(story("Lakers win finals", "https://example.test/lakers"))
+    env.swarm.inject_news(story("Chile lithium mine strike cuts supply"))
+    env.swarm.tick()
+    html = render_html(env.swarm.view())
+    assert "Not financial advice." in html
+    assert "Lakers win finals" in html
+    assert 'data-effect="' in html
+    httpd = serve(env.swarm)
+    host, port = httpd.server_address
+    with urllib.request.urlopen(f"http://{host}:{port}/") as response:
+        body = response.read().decode()
+    httpd.shutdown()
+    assert "Not financial advice." in body
+    assert "Dismissed Sightings" in body
+
+
+def test_recorded_and_canned_demo(tmp_path: Path) -> None:
+    env = world(tmp_path)
+    portfolio(env)
+    env.you.fail = True
+    env.swarm.run_demo("recorded")
+    impacts = {impact["ticker"]: impact["stance"] for impact in env.swarm.view()["theses"][-1]["impacts"]}
+    assert impacts == {"TSLA": "Bear", "ALB": "Bull"}
+    assert env.you.calls == []
+
+    canned_dir = tmp_path / "canned"
+    canned_dir.mkdir()
+    canned = world(canned_dir)
+    canned.swarm.set_holdings([("TSLA", 0.4), ("ALB", 0.2)])
+    canned.swarm.add_topic("lithium", ["TSLA", "ALB"])
+    canned.swarm.run_demo("canned")
+    impacts = {impact["ticker"]: impact["stance"] for impact in canned.swarm.view()["theses"][-1]["impacts"]}
+    assert impacts == {"TSLA": "Bear", "ALB": "Bull"}
+    assert canned.you.calls == []
+    assert canned.swarm.view()["theses"][-1]["claims"][0]["kind"] == "inference"
+
+
+def test_recording_check_and_cursor_rejection(tmp_path: Path) -> None:
+    env = world(tmp_path)
+    assert env.swarm.start()["ok"] is True
+    try:
+        env.swarm.configure(researcher="cursor")
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised
+    assert recording_status(None)["status"] == "INCONCLUSIVE"
+    from ground_truth.recording_check import claude_argv
+
+    assert claude_argv("investigate the event") == ["claude", "-p", "investigate the event"]
+    assert "--bare" not in claude_argv("investigate the event")
+
+
+def test_time_budget_stops_research(tmp_path: Path) -> None:
+    env = world(tmp_path)
+    portfolio(env)
+
+    def slow(event_id: str, prompt: str, tools: Any) -> dict:
+        env.clock.advance(minutes=4)
+        result = tools.research("lite", "too late")
+        return {"answers": answered(), "missing": [result["error"]]}
+
+    env.harness.on("researcher", slow)
+    env.swarm.inject_news(story("Chile lithium mine strike cuts supply"))
+    env.swarm.tick()
+    assert env.swarm.view()["costs"]["research"] == 0
+    assert "time" in env.swarm.view()["theses"][0]["missing"]
