@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import threading
+import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ground_truth.dashboard import render_html, serve
+from ground_truth.dashboard import bind_address, render_html, serve
 from ground_truth.adapters import edgar_user_agent
 from ground_truth.__main__ import _Llm
 from ground_truth.domain import QUESTIONS, NewsItem
@@ -583,3 +584,62 @@ def test_time_budget_stops_research(tmp_path: Path) -> None:
     env.swarm.tick()
     assert env.swarm.view()["costs"]["research"] == 0
     assert "time" in env.swarm.view()["theses"][0]["missing"]
+
+
+def test_dashboard_escapes_sighting_titles(tmp_path: Path) -> None:
+    env = world(tmp_path)
+    portfolio(env)
+    env.swarm.inject_news(story("<script>bad</script>", "https://example.test/xss"))
+    env.swarm.tick()
+    page = render_html(env.swarm.view())
+    assert "<script>bad</script>" not in page
+    assert "&lt;script&gt;bad&lt;/script&gt;" in page
+
+
+def test_local_dashboard_saves_portfolio_and_opens_thesis(tmp_path: Path) -> None:
+    assert bind_address({}) == ("127.0.0.1", 8080)
+    assert bind_address({"DASHBOARD_HOST": "0.0.0.0", "DASHBOARD_PORT": "8080"}) == ("0.0.0.0", 8080)
+    compose = Path("docker-compose.yml").read_text()
+    assert "DASHBOARD_HOST: 0.0.0.0" in compose
+    env = world(tmp_path)
+    portfolio(env)
+    env.swarm.llm = _Llm()
+    env.swarm.inject_news(story("Chile lithium mine strike cuts supply"))
+    env.swarm.tick()
+    thesis_id = env.swarm.view()["theses"][0]["id"]
+    httpd = serve(env.swarm, "127.0.0.1", 0)
+    host, port = httpd.server_address
+    base = f"http://{host}:{port}"
+
+    def post(fields: dict[str, str]) -> str:
+        data = urllib.parse.urlencode(fields).encode()
+        request = urllib.request.Request(base + "/", data=data, method="POST")
+        with urllib.request.urlopen(request) as response:
+            return response.read().decode()
+
+    page = post({"action": "remove_holding", "ticker": "ALB"})
+    assert 'data-ticker="ALB"' not in page
+    assert 'data-ticker="TSLA"' in page
+    page = post({"action": "add_holding", "ticker": "F", "weight": "0.1"})
+    assert 'data-ticker="F"' in page
+    page = post({"action": "add_holding", "ticker": "F", "weight": "4"})
+    assert "Enter a weight from 0 to 1." in page
+    page = post({"action": "suggest_topics"})
+    assert "EV supply chain" in page
+    assert 'data-status="suggested"' in page
+    page = post(
+        {
+            "action": "save_settings",
+            "alert_weight": "0.5",
+            "you_search_usd": "0.5",
+            "you_research_usd": "2",
+            "monthly_budget_usd": "25",
+        }
+    )
+    assert "Spend $" in page
+    assert "of $25.00 this month." in page
+    with urllib.request.urlopen(f"{base}/thesis/{thesis_id}") as response:
+        one = response.read().decode()
+    assert f'id="thesis-{thesis_id}"' in one
+    assert "Chile lithium mine strike cuts supply" in one
+    httpd.shutdown()

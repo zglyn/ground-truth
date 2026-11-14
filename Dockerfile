@@ -11,5 +11,7 @@ COPY pyproject.toml ./
 COPY src ./src
 ENV PYTHONPATH=/app/src
 ENV SWARM_DB=/data/swarm.sqlite
+ENV DASHBOARD_HOST=0.0.0.0
+ENV DASHBOARD_PORT=8080
 EXPOSE 8080
 CMD ["python", "-m", "ground_truth"]

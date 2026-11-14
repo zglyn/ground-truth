@@ -165,6 +165,17 @@ class Swarm:
     def set_holdings(self, holdings: list[tuple[str, float]]) -> None:
         self.store.set_holdings([(ticker.upper(), float(weight)) for ticker, weight in holdings])
 
+    def save_holding(self, ticker: str, weight: float) -> None:
+        symbol = ticker.upper()
+        rows = [(row["ticker"], float(row["weight"])) for row in self.store.holdings() if row["ticker"] != symbol]
+        rows.append((symbol, weight))
+        self.store.set_holdings(rows)
+
+    def save_rates(self, search_usd: str, research_usd: str, budget_usd: str) -> None:
+        self.store.set_setting("you_search_usd", search_usd)
+        self.store.set_setting("you_research_usd", research_usd)
+        self.store.set_setting("monthly_budget_usd", budget_usd)
+
     def remove_holding(self, ticker: str) -> None:
         self.store.remove_holding(ticker.upper())
 
@@ -341,6 +352,8 @@ class Swarm:
             "priced": priced,
             "spend_usd": spend_usd(search_count, research_count, search_rate, research_rate),
             "budget_usd": float(budget_raw or "25"),
+            "search_usd": search_raw,
+            "research_usd": research_raw,
         }
 
     def _scout(self) -> None:
