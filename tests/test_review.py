@@ -63,6 +63,40 @@ def test_production_uses_a_real_clock(tmp_path: Path) -> None:
     assert "not recorded in OpenCrawl" in swarm.runtime["label"]
 
 
+def test_custom_code_mode_is_not_paused_when_claude_is_installed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import ground_truth.opencrawl as opencrawl
+
+    monkeypatch.setattr(opencrawl.shutil, "which", lambda name: "C:/tools/claude.cmd" if name == "claude" else None)
+    swarm = build_swarm(str(tmp_path / "win.sqlite"))
+    status = swarm.start()
+    assert status["ok"] is True
+    assert swarm.blocked is False
+    assert "never start a harness" in status["detail"]
+    assert "opencrawl command was not found" in status["detail"]
+    assert type(swarm.board).__name__ == "LocalBoard"
+
+
+def test_cli_run_uses_the_resolved_opencrawl_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+
+    import ground_truth.opencrawl as opencrawl
+
+    seen: list[list[str]] = []
+
+    class Done:
+        returncode = 0
+        stdout = '{"schemaVersion": 1, "data": {"ok": true}}'
+        stderr = ""
+
+    monkeypatch.setattr(opencrawl.shutil, "which", lambda name: r"C:\\npm\\opencrawl.cmd")
+    monkeypatch.setattr(opencrawl.subprocess, "run", lambda argv, **kwargs: seen.append(argv) or Done())
+    assert opencrawl.cli_run(["whoami", "--json"]) == {"ok": True}
+    assert seen[0][0].endswith("opencrawl.cmd")
+    monkeypatch.setattr(opencrawl.shutil, "which", lambda name: None)
+    with pytest.raises(RuntimeError, match="not on PATH"):
+        opencrawl.cli_run(["whoami"])
+
+
 # ----- prices by date and the trading calendar --------------------------------
 
 

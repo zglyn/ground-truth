@@ -8,7 +8,7 @@ import time
 from ground_truth.adapters import LiveNews, LivePages, LiveQuotes, LiveYou
 from ground_truth.domain import topics_for_holdings
 from ground_truth.dashboard import bind_address, serve
-from ground_truth.opencrawl import OpenCrawlBoard, OpenCrawlSessions, cli_run
+from ground_truth.opencrawl import LocalBoard, LocalSessions, OpenCrawlBoard, OpenCrawlSessions, cli_run, opencrawl_path
 from ground_truth.recording_check import allows_start, recording_status
 from ground_truth.swarm import ScriptedHarness, Swarm, SystemClock
 
@@ -35,7 +35,19 @@ class _Llm:
 
 
 class _Recording:
+    def __init__(self, mode: str = "recorded", board: str = "OpenCrawl") -> None:
+        self.mode = mode
+        self.board = board
+
     def check(self, harness_name: str) -> dict:
+        if self.mode == "custom-code":
+            return {
+                "ok": True,
+                "detail": (
+                    "Custom-code mode: the Researcher and Analyst run inside this app and never start a harness, "
+                    f"so there is no session to record. The board runs on {self.board}."
+                ),
+            }
         if harness_name == "cursor":
             return {"ok": False, "detail": "Cursor is not used for the Researcher"}
         binary = shutil.which("claude" if harness_name == "claude" else harness_name)
@@ -53,6 +65,10 @@ class _Recording:
 
 
 def build_swarm(path: str | None = None) -> Swarm:
+    if opencrawl_path():
+        board, sessions, board_name = OpenCrawlBoard(cli_run), OpenCrawlSessions(cli_run), "OpenCrawl"
+    else:
+        board, sessions, board_name = LocalBoard(), LocalSessions(), "this computer (the opencrawl command was not found)"
     return Swarm(
         path or os.environ.get("SWARM_DB", "ground-truth.sqlite"),
         clock=SystemClock(),
@@ -60,12 +76,12 @@ def build_swarm(path: str | None = None) -> Swarm:
         you=LiveYou(),
         pages=LivePages(),
         quotes=LiveQuotes(),
-        board=OpenCrawlBoard(cli_run),
-        sessions=OpenCrawlSessions(cli_run),
+        board=board,
+        sessions=sessions,
         harness=ScriptedHarness(mode="custom-code"),
         discord=_Discord(),
         llm=_Llm(),
-        recording=_Recording(),
+        recording=_Recording("custom-code", board_name),
         dashboard_url=os.environ.get("DASHBOARD_URL", "http://127.0.0.1:8080"),
     )
 

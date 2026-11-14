@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
+import threading
+import uuid
 from typing import Any, Callable
 
 Runner = Callable[[list[str]], dict[str, Any]]
@@ -11,13 +14,23 @@ SESSION_ID = "ground-truth-supervisor"
 TOPIC = "swarm"
 
 
+def opencrawl_path() -> str | None:
+    """Full path to the OpenCrawl CLI. On Windows this finds opencrawl.cmd or .exe via PATHEXT."""
+    return shutil.which("opencrawl")
+
+
 def cli_run(args: list[str]) -> dict[str, Any]:
+    binary = opencrawl_path()
+    if binary is None:
+        raise RuntimeError("the opencrawl command is not on PATH")
     try:
-        completed = subprocess.run(["opencrawl", *args], check=False, capture_output=True, text=True, timeout=20)
+        completed = subprocess.run([binary, *args], check=False, capture_output=True, text=True, timeout=20)
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("opencrawl timed out") from exc
     if completed.returncode != 0:
-        raise RuntimeError(f"opencrawl exited {completed.returncode}")
+        detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+        hint = f": {detail[-1][:200]}" if detail else ""
+        raise RuntimeError(f"opencrawl exited {completed.returncode}{hint}")
     payload = json.loads(completed.stdout or "{}")
     if payload.get("schemaVersion") != 1 or not isinstance(payload.get("data"), dict):
         raise RuntimeError("opencrawl returned an unexpected payload")
@@ -128,3 +141,40 @@ class OpenCrawlSessions:
         if not isinstance(results, list):
             return []
         return [str(row["id"]) for row in results if isinstance(row, dict) and row.get("id")]
+
+
+class LocalBoard:
+    """In-process board used when the OpenCrawl CLI is not installed.
+
+    Messages live in memory only. That is safe because the Supervisor also
+    re-reads pending Sightings from the database on every tick.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._pending: list[dict[str, str]] = []
+
+    def post(self, text: str) -> dict[str, str]:
+        message = {"id": uuid.uuid4().hex, "text": text}
+        with self._lock:
+            self._pending.append(message)
+        return message
+
+    def fetch_all(self) -> list[dict[str, str]]:
+        with self._lock:
+            messages, self._pending = self._pending, []
+        return messages
+
+
+class LocalSessions:
+    def __init__(self) -> None:
+        self._rows: dict[str, str] = {}
+
+    def store_session(self, session_id: str, text: str) -> None:
+        self._rows[session_id] = text
+
+    def fetch_session(self, session_id: str) -> str:
+        return self._rows.get(session_id, "")
+
+    def search(self, query: str) -> list[str]:
+        return [key for key, value in self._rows.items() if query.lower() in value.lower()]
