@@ -72,7 +72,7 @@ def test_custom_code_mode_is_not_paused_when_claude_is_installed(tmp_path: Path,
     assert status["ok"] is True
     assert swarm.blocked is False
     assert "never start a harness" in status["detail"]
-    assert "opencrawl command was not found" in status["detail"]
+    assert "opencrawl" not in status["detail"].lower()
     assert type(swarm.board).__name__ == "LocalBoard"
 
 

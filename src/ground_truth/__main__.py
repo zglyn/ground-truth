@@ -46,7 +46,7 @@ class _Recording:
                 "ok": True,
                 "detail": (
                     "Custom-code mode: the Researcher and Analyst run inside this app and never start a harness, "
-                    f"so there is no session to record. The board runs on {self.board}."
+                    "so there is no session to record."
                 ),
             }
         if harness_name == "cursor":
